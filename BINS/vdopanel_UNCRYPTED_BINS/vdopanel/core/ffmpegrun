@@ -1,0 +1,417 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -lt 6 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+export User=$1
+export Domain=$2
+export Port=$3
+export List=$4
+export Mode=$5
+export Logo=$6
+export Jingle=$7
+export Jingnu=$8
+export JingnT=$9
+export Bitrate=${10}
+export WM_pos=${11}
+export WM_size=${12}
+
+DB_NAME=`cat /home/vdopanel/public_html/.env | grep DB_DATABASE= | cut -d"=" -f2`
+ST_TYPE=`mysql ${DB_NAME} -e "SELECT stream_type FROM broadcasters WHERE name='${User}'\G" | awk '{print $2}' | tail -1`
+ST_MULTI=`mysql ${DB_NAME} -e "SELECT stream_multi FROM broadcasters WHERE name='${User}'\G" | awk '{print $2}' | tail -1`
+B_TYPE=`mysql ${DB_NAME} -e "SELECT B_type FROM broadcasters WHERE name='${User}'\G" | awk '{print $2}' | tail -1`
+B_ID=`mysql ${DB_NAME} -e "SELECT id FROM broadcasters WHERE name='${User}'\G" | awk '{print $2}' | tail -1`
+SOCIAL_CHK=`mysql ${DB_NAME} -e "SELECT youtube_status,facebook_status,twitch_status,periscope_status,dailymotion_status,custom_status FROM social_streams WHERE broadcaster_id='${B_ID}'\G" | awk '{print $2}'`
+RECORD_RE=`mysql ${DB_NAME} -e "SELECT restream_record FROM broadcasters WHERE name='${User}'\G" | awk '{print $2}' | tail -1`
+multi_ForSocial=""
+multi_MAX=""
+multi_288=""
+multi_448=""
+multi_1152=""
+multi_2048=""
+multi_4096=""
+AV_SCALE=""
+MAP_OUT=""
+
+/home/vdopanel/core/utils recordrestream disable ${User} all
+if [[ ${Mode} == "restream" && ${RECORD_RE} == 1 ]]; then
+	/home/vdopanel/core/utils recordrestream enable ${User} ${ST_TYPE}
+fi
+
+OUT_COUNT=0
+if [[ ${ST_TYPE} == "multi" ]]; then
+	if [[ ${B_TYPE} != 1 ]] && [[ ${SOCIAL_CHK} == *"on"* || ${B_TYPE} == 3 ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf format=yuv420p"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_ForSocial="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b ${Bitrate}k -maxrate ${Bitrate}k -bufsize ${Bitrate}k \
+		-f flv rtmp://${Domain}:${Port}/${User}stream/play"
+	fi
+	if [[ ${ST_MULTI} == *"288"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf scale=480:trunc(ow/a/2)*2"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_288="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b 288k -maxrate 288k -bufsize 288k \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_240"
+	fi
+	if [[ ${ST_MULTI} == *"448"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf scale=720:trunc(ow/a/2)*2"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_448="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b 448k -maxrate 448k -bufsize 448k \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_360"
+	fi
+	if [[ ${ST_MULTI} == *"1152"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf scale=960:trunc(ow/a/2)*2"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_1152="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b 1152k -maxrate 1152k -bufsize 1152k \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_480"
+	fi
+	if [[ ${ST_MULTI} == *"2048"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf scale=1280:trunc(ow/a/2)*2"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_2048="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b 2048k -maxrate 2048k -bufsize 2048k \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_720"
+	fi
+	if [[ ${ST_MULTI} == *"4096"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			AV_SCALE="-vf scale=1920:trunc(ow/a/2)*2"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+		fi
+		multi_4096="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${AV_SCALE} \
+		-b 4096k -maxrate 4096k -bufsize 4096k \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_1080"
+	fi
+	if [[ ${ST_MULTI} == *"90000"* ]]; then
+		if [[ ${Logo} == "nologo" ]]; then
+			yuv420p="-vf format=yuv420p"
+		else
+			OUT_COUNT=$((OUT_COUNT +1))
+			MAP_OUT="-map 0:a? -map [out${OUT_COUNT}]"
+			yuv420p=""
+		fi
+		multi_MAX="${MAP_OUT} -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 ${yuv420p} \
+		-f flv rtmp://${Domain}:${Port}/multi_web/play_src"
+	fi
+
+	OUT_LINE_FUN(){
+		countO=0
+		for O_NUM in $(seq ${1})
+		do
+			echo [out${O_NUM}]
+		done
+	}
+	OUT_LINE_=`OUT_LINE_FUN ${OUT_COUNT}`
+fi
+
+cPanel_chk="/usr/local/cpanel/version"
+if [ ! -f ${cPanel_chk} ]; then
+	LOG_FILE="/home/${User}/logs/ffmpeg.log"
+	IMG_FILE="/home/${User}/imgs/${Logo}"
+	PLY_FILE="/home/${User}/playlist/${List}"
+	Jing_PLY="/home/${User}/playlist/${Jingle}"
+else
+	LOG_FILE="/home/vdopanel/users/${User}/logs/ffmpeg.log"
+	IMG_FILE="/home/vdopanel/users/${User}/imgs/${Logo}"
+	PLY_FILE="/home/vdopanel/users/${User}/playlist/${List}"
+	Jing_PLY="/home/vdopanel/users/${User}/playlist/${Jingle}"
+fi
+
+ffmpeg_func()
+{
+  date >> ${LOG_FILE}
+  VIDEO_F=`echo ${i} | rev | cut -d"/" -f1 | rev`
+  if [ ${Logo} = "nologo" ]; then
+	if [[ ${ST_TYPE} == "multi" ]]; then
+		ffmpeg -re \
+		${3} \
+		-i "${i}" \
+		${2} \
+		${multi_ForSocial} \
+		${multi_MAX}  \
+		${multi_288}  \
+		${multi_448}  \
+		${multi_1152} \
+		${multi_2048} \
+		${multi_4096} \
+		>> ${LOG_FILE} 2>&1 < /dev/null
+	else
+		ffmpeg -re \
+		${3} \
+		-i "${i}" \
+		${2} \
+		-c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 -vf "format=yuv420p" \
+		-b ${Bitrate}k -maxrate ${Bitrate}k -bufsize ${Bitrate}k \
+		-f flv "rtmp://${Domain}:${Port}/${User}stream/play" >> ${LOG_FILE} 2>&1 < /dev/null
+	fi
+  else
+	WM_S=`ffmpeg -i "${i}" 2>&1 | grep -oP 'Stream .*, \K[0-9]+x[0-9]+' | head -1 | awk 'BEGIN {FS="x"} {print int($1/20)}'`
+	if [ ${WM_size} != 0 ]; then
+		Scale_S=$( echo "${WM_S} / 100 * ${WM_size}" | bc -l | cut -d "." -f1 )
+		if [[ ! ${Scale_S} ]]; then
+			Scale_S=1
+		fi
+		WM_S=$( echo "${WM_S} + ${Scale_S}" | bc )
+	fi
+	POSI_W_H=`ffmpeg -i "${i}" 2>&1 | grep -oP 'Stream .*, \K[0-9]+x[0-9]+' | head -1 | awk 'BEGIN {FS="x"} {print int($1/36)":"int($2/7.5)}'`
+	W_ONLY=`echo ${POSI_W_H} | cut -d ":" -f1`
+	H_ONLY=`echo ${POSI_W_H} | cut -d ":" -f2`
+	if [[ ${WM_pos} == "topleft" ]]; then
+		POSI="${POSI_W_H}"
+	elif [[ ${WM_pos} == "center" ]]; then
+		POSI="main_w/2-overlay_w/2:main_h/2-overlay_h/2"
+	elif [[ ${WM_pos} == "bottomright" ]]; then
+		POSI="main_w-overlay_w-${W_ONLY}:main_h-overlay_h-${H_ONLY}"
+	elif [[ ${WM_pos} == "bottomleft" ]]; then
+		POSI="${W_ONLY}:main_h-overlay_h-${H_ONLY}"
+	else
+		POSI="main_w-overlay_w-${POSI_W_H}"
+	fi
+
+	if [[ ${ST_TYPE} == "multi" ]]; then
+		ffmpeg -re \
+		${3} \
+		-i "${i}" \
+		-i ${IMG_FILE} \
+		${2} \
+		-filter_complex "[1:v] scale=${WM_S}x${WM_S} [WM_L]; [0:v][WM_L] overlay=${POSI}, split=${OUT_COUNT}${OUT_LINE_}" \
+		${multi_ForSocial} \
+		${multi_MAX}  \
+		${multi_288}  \
+		${multi_448}  \
+		${multi_1152} \
+		${multi_2048} \
+		${multi_4096} \
+		>> ${LOG_FILE} 2>&1 < /dev/null
+	else
+		ffmpeg -re \
+		${3} \
+		-i "${i}" \
+		-i ${IMG_FILE} \
+		${2} \
+		-filter_complex "[1:v] scale=${WM_S}x${WM_S} [WM_L]; [0:v][WM_L] overlay=${POSI}" \
+		-map 0:a? -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 \
+		-b ${Bitrate}k -maxrate ${Bitrate}k -bufsize ${Bitrate}k \
+		-f flv "rtmp://${Domain}:${Port}/${User}stream/play" >> ${LOG_FILE} 2>&1 < /dev/null
+	fi
+  fi
+  echo -e "\n##################################\n" >> ${LOG_FILE}
+  if [[ ${1} == "vstatic" ]]; then
+	/home/vdopanel/core/utils videost ${User} ${Port} ${VIDEO_F} </dev/null >/dev/null 2>&1 &
+  fi
+}
+
+
+
+ffmpeg_func2_Jingle()
+{
+  date >> ${LOG_FILE}
+  VIDEO_F=`echo ${i3} | rev | cut -d"/" -f1 | rev`
+  if [ ${Logo} = "nologo" ]; then
+	if [[ ${ST_TYPE} == "multi" ]]; then
+		ffmpeg -re \
+		-i "${i3}" \
+		${multi_ForSocial} \
+		${multi_MAX}  \
+		${multi_288}  \
+		${multi_448}  \
+		${multi_1152} \
+		${multi_2048} \
+		${multi_4096} \
+		>> ${LOG_FILE} 2>&1 < /dev/null
+	else
+	        ffmpeg -re \
+        	-i "${i3}" \
+	        -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 -vf "format=yuv420p" \
+		-b ${Bitrate}k -maxrate ${Bitrate}k -bufsize ${Bitrate}k \
+	        -f flv "rtmp://${Domain}:${Port}/${User}stream/play" >> ${LOG_FILE} 2>&1 < /dev/null
+	fi
+  else
+        WM_S=`ffmpeg -i "${i3}" 2>&1 | grep -oP 'Stream .*, \K[0-9]+x[0-9]+' | head -1 | awk 'BEGIN {FS="x"} {print int($1/20)}'`
+	if [ ${WM_size} != 0 ]; then
+		Scale_S=$( echo "${WM_S} / 100 * ${WM_size}" | bc -l | cut -d "." -f1 )
+		if [[ ! ${Scale_S} ]]; then
+			Scale_S=1
+		fi
+		WM_S=$( echo "${WM_S} + ${Scale_S}" | bc )
+	fi
+        POSI_W_H=`ffmpeg -i "${i3}" 2>&1 | grep -oP 'Stream .*, \K[0-9]+x[0-9]+' | head -1 | awk 'BEGIN {FS="x"} {print int($1/36)":"int($2/7.5)}'`
+	W_ONLY=`echo ${POSI_W_H} | cut -d ":" -f1`
+	H_ONLY=`echo ${POSI_W_H} | cut -d ":" -f2`
+	if [[ ${WM_pos} == "topleft" ]]; then
+		POSI="${POSI_W_H}"
+	elif [[ ${WM_pos} == "center" ]]; then
+		POSI="main_w/2-overlay_w/2:main_h/2-overlay_h/2"
+	elif [[ ${WM_pos} == "bottomright" ]]; then
+		POSI="main_w-overlay_w-${W_ONLY}:main_h-overlay_h-${H_ONLY}"
+	elif [[ ${WM_pos} == "bottomleft" ]]; then
+		POSI="${W_ONLY}:main_h-overlay_h-${H_ONLY}"
+	else
+		POSI="main_w-overlay_w-${POSI_W_H}"
+	fi
+
+	if [[ ${ST_TYPE} == "multi" ]]; then
+		ffmpeg -re \
+		-i "${i3}" \
+		-i ${IMG_FILE} \
+		-filter_complex "[1:v] scale=${WM_S}x${WM_S} [WM_L]; [0:v][WM_L] overlay=${POSI}, split=${OUT_COUNT}${OUT_LINE_}" \
+		${multi_ForSocial} \
+		${multi_MAX}  \
+		${multi_288}  \
+		${multi_448}  \
+		${multi_1152} \
+		${multi_2048} \
+		${multi_4096} \
+		>> ${LOG_FILE} 2>&1 < /dev/null
+	else
+	        ffmpeg -re \
+        	-i "${i3}" \
+	        -i ${IMG_FILE} \
+        	-filter_complex "[1:v] scale=${WM_S}x${WM_S} [WM_L]; [0:v][WM_L] overlay=${POSI}" \
+	        -map 0:a? -c:v libx264 -profile high -level 4.1 -c:a aac -tune zerolatency -preset superfast -crf 23 \
+		-b ${Bitrate}k -maxrate ${Bitrate}k -bufsize ${Bitrate}k \
+	        -f flv "rtmp://${Domain}:${Port}/${User}stream/play" >> ${LOG_FILE} 2>&1 < /dev/null
+	fi
+  fi
+  echo -e "\n##################################\n" >> ${LOG_FILE}
+  /home/vdopanel/core/utils videost ${User} ${Port} ${VIDEO_F} </dev/null >/dev/null 2>&1 &
+}
+
+
+
+jingle_func()
+{
+  if [ ${Jingle} != "nojingle" ]; then
+	if [ ${JingnT} = 1 ]; then
+		Count=$((Count +1))
+		if [ ${Jingnu} = ${Count} ]; then
+			for i in `cat ${Jing_PLY}`
+			do
+				ffmpeg_func "vstatic"
+			done
+			Count=0
+		fi
+	fi
+  fi
+}
+
+jingle_func2()
+{
+	Jingle2_RUN()
+	  {
+		for i3 in `cat ${Jing_PLY}`
+		do
+			ffmpeg_func2_Jingle
+		done
+	  }
+	FILE_DU=`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ${i} | cut -d "." -f1`
+	if [[ ${TMP_DUR} -ge ${FILE_DU} ]]; then
+		### ffmpeg full command - ${FILE_DU} ###
+		ffmpeg_func "vstatic"
+		TMP_DUR=$( echo "${TMP_DUR} - ${FILE_DU}" | bc )
+	else
+		TOTAL=$( echo "(${FILE_DU} - ${TMP_DUR}) / ${Jingnu}" | bc )
+		if [ ${TOTAL} -gt 1 ]; then
+			### ffmpeg run from start to ${TMP_DUR} ###
+			ffmpeg_func "no-vstatic" "-to ${TMP_DUR}"
+			Jingle2_RUN
+			TOTAL_LOP=$((TOTAL +1))
+			SECOND2=${TMP_DUR}
+			TMP_DUR2=$( echo "${FILE_DU} - ${TMP_DUR}" | bc )
+			static_count=0
+			for i2 in $(seq ${TOTAL_LOP})
+			do
+				### ffmpeg start from ${SECOND2} to ${Jingnu} ###
+				if [[ ${static_count} != ${TOTAL_LOP} ]]; then
+					ffmpeg_func "no-vstatic" "-to ${Jingnu}" "-ss ${SECOND2}"
+				else
+					ffmpeg_func "vstatic" "-to ${Jingnu}" "-ss ${SECOND2}"
+				fi
+				SECOND2=$((SECOND2 +${Jingnu}))
+				TMP_DUR2=$( echo "${TMP_DUR2} - ${Jingnu}" | bc )
+				Jingle2_RUN
+			done
+			TMP_DUR2=$( echo "${TMP_DUR2} + ${Jingnu}" | bc )
+			TMP_DUR=$( echo "${Jingnu} - ${TMP_DUR2}" | bc )
+		else
+			### ffmpeg run from start to ${TMP_DUR} ###
+			ffmpeg_func "no-vstatic" "-to ${TMP_DUR}"
+			Jingle2_RUN
+			### ffmpeg run from ${TMP_DUR} to ${Jingnu} ###
+			ffmpeg_func "vstatic" "-to ${Jingnu}" "-ss ${TMP_DUR}"
+			TMP_DUR2=$( echo "${FILE_DU} - ${TMP_DUR}" | bc )
+			TMP_DUR=$( echo "${Jingnu} - ${TMP_DUR2}" | bc )
+		fi
+	fi
+}
+
+
+if [[ ${Mode} == "restream" ]]; then
+	echo "start restream process."
+	i=${List}
+	if [[ ${List} == *"youtube.com/watch"* ]]; then
+		RE_Y_URL=`youtube-dl -g ${List}`
+		i=${RE_Y_URL}
+	fi
+	ffmpeg_func "no-vstatic"
+	exit -1
+fi
+
+Count=0
+TMP_DUR=${Jingnu}
+while true
+do
+  if [[ ${Mode} == "shuffle" ]]; then
+	for i in `cat ${PLY_FILE} | shuf`
+	do
+		if [[ ${i} ]]; then
+			if [[ ${Jingle} != "nojingle" ]] && [[ ${JingnT} == 2 ]]; then
+				jingle_func2
+				continue
+			fi
+			ffmpeg_func "vstatic"
+			jingle_func
+		fi
+	done
+  elif [[ ${Mode} == "sequential" ]]; then
+	for i in `cat ${PLY_FILE}`
+	do
+		if [[ ${i} ]]; then
+			if [[ ${Jingle} != "nojingle" ]] && [[ ${JingnT} == 2 ]]; then
+				jingle_func2
+				continue
+			fi
+			ffmpeg_func "vstatic"
+			jingle_func
+		fi
+	done
+  fi
+done

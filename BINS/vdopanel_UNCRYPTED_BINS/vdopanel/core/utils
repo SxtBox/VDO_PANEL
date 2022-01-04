@@ -1,0 +1,2185 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -lt 1 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+export Option=$1
+
+validation_func()
+{
+ if [ $? -ne 0 ]; then
+	${1}
+	exit -1
+ fi
+}
+
+ARGC_func()
+{
+ if [ $ARGC -ne ${1} ]; then
+	echo "invalid option : this option must be contain ${2} ARGC"
+	exit -1
+ fi
+}
+
+NGX_CONF="/etc/nginx/conf.d"
+VSFFTPdir="/etc/vsftpd/users_config"
+SOU_CONF="/home/vdopanel/core/conf-templates"
+STUNNEL_CONF="/etc/stunnel/stunnel.conf"
+cPanel_USER="/home/vdopanel/users"
+DB_NAME=`cat /home/vdopanel/public_html/.env | grep DB_DATABASE= | cut -d"=" -f2`
+SERV_IP=`dig TXT +short o-o.myaddr.l.google.com @ns1.google.com -4 | tr -d '"'`
+G_COLOR1="--color"
+G_COLOR2="=auto"
+G_COLOR_="${G_COLOR1}${G_COLOR2}"
+cPanel_chk="/usr/local/cpanel/version"
+
+########################################################################################
+####################### change user [ username oldUSER newUSER ] #######################
+
+if [ ${Option} = "username" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		/usr/sbin/usermod -l ${3} -m -d /home/${3} ${2} 1>/dev/null
+		validation_func "echo Error : change username"
+		mv ${VSFFTPdir}/${2} ${VSFFTPdir}/${3}
+		echo -e "local_root=/home/${3}/uploads\nwrite_enable=YES\n" > ${VSFFTPdir}/${3}
+	else
+#		if [ -d "${cPanel_USER}/${3}" ]; then
+#			echo "Error : new user already exists."
+#			exit -1
+#		fi
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp delftp user=${2} destroy=0 >/dev/null 2>&1
+		mv ${cPanel_USER}/${2} ${cPanel_USER}/${3}
+		FTP_PASS=`mysql ${DB_NAME} -e "SELECT ftp FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+		FTP_quot=`mysql ${DB_NAME} -e "SELECT station_storage FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp addftp user=${3} pass=${FTP_PASS} quota=${FTP_quot} homedir=users/${3}/uploads >/dev/null 2>&1
+	fi
+
+	mv ${NGX_CONF}/${2}-rtmp.conf ${NGX_CONF}/${3}-rtmp.conf
+	mv ${NGX_CONF}/${2}-http.http ${NGX_CONF}/${3}-http.http
+	sed -i "s/${2}/${3}/g" "${NGX_CONF}/${3}-rtmp.conf"
+	sed -i "s/${2}/${3}/g" "${NGX_CONF}/${3}-http.http"
+	/bin/systemctl reload nginx.service
+#	validation_func "echo Error : change username, nginx reload"
+	echo -e "success-done"
+fi
+
+################################################################################################
+####################### delete user [ deluser USER HTTP_PORT RTMP_PORT ] #######################
+
+if [ ${Option} = "deluser" ]; then
+	ARGC_func 4 4
+	for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "utils deluser ${2}" | grep -v "G_COLOR_=" | grep ${2} | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+	if [ ! -f ${cPanel_chk} ]; then
+		/usr/sbin/userdel -r ${2} >/dev/null 2>&1
+#		validation_func "echo Error : delete username"
+	else
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp delftp user=${2} destroy=1 >/dev/null 2>&1
+		rm -rf ${cPanel_USER}/${2}
+	fi
+	## ${2}-rtmp.conf - {2}-rtmp.conf_suspend - ${2}-rtmp.conf_bandwhold - ${2}-rtmp.conf_stop -_- ${2}-http.http ${2}-http_suspend.http
+	rm -rf ${NGX_CONF}/${2}-rtmp* ${NGX_CONF}/${2}-http* /etc/nginx/loadb/${2}.balance
+	rm -rf ${VSFFTPdir}/${2}
+	rm -rf /home/vdopanel/public_html/public/uploads/playerpic/${2}.*
+	BANDW_TMP="/home/vdopanel/core/tmp/bandw"
+	LINE1=`sed -n "\|_${2}_vdo|=" "${STUNNEL_CONF}"`
+	LINE2=$( echo "${LINE1} + 5" | bc )
+	sed -i "${LINE1},${LINE2}d;" "${STUNNEL_CONF}"
+	/bin/systemctl reload stunnel
+	KILL_LIST=("${3}" "${4}")
+	for Port in "${KILL_LIST[@]}"
+	do
+		for i1 in `ps -aux | grep bandwidthupdate | grep -v "grep ${G_COLOR_}" | grep -v "utils deluser ${2}" | grep ${2} | grep ${Port} | awk '{print $2}'`
+		do
+			kill -9 ${i1}
+		done
+		for i2 in `ps -aux | grep iftop | grep -v "grep ${G_COLOR_}" | grep -v " \-c " | grep ${Port} | awk '{print $2}'`
+		do
+			kill -9 ${i2}
+		done
+	done
+	rm -rf ${BANDW_TMP}/bandw-${3} ${BANDW_TMP}/bandw-${4}
+	Remove_Plimit=`/usr/sbin/iptables -L -n -v --line-numbers | grep "${3},${4}" | grep reject-with | awk '{print $1}'`
+	if [[ ${Remove_Plimit} ]]; then
+		/usr/sbin/iptables -D INPUT ${Remove_Plimit} >/dev/null 2>&1
+		service iptables save >/dev/null 2>&1
+	fi
+	/bin/systemctl reload nginx.service
+#	validation_func "echo Error : delete username, nginx reload"
+	echo -e "success-done"
+fi
+
+#########################################################################################
+####################### change ftp password [ ftppass USER PASS ] #######################
+
+if [ ${Option} = "ftppass" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		echo ${3} | passwd ${2} --stdin 1>/dev/null
+		validation_func "echo Error : change ftp password"
+	else
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp passwd user=${2} pass=${3} >/dev/null 2>&1
+	fi
+	echo -e "success-done"
+fi
+
+####################################################################################################
+####################### change rtmp port [ rtmpupdate USER oldPORT newPORT ] #######################
+
+if [ ${Option} = "rtmpupdate" ]; then
+	ARGC_func 4 4
+	CHK_PORT1=`netstat -an | grep ":${4} "`
+	if [[ ${CHK_PORT1} ]]; then
+		echo -e "Error : rtmp port in use."
+		exit -1
+	fi
+	sed -i "s/listen ${3}/listen ${4}/g" "${NGX_CONF}/${2}-rtmp.conf"
+	/bin/systemctl reload nginx.service
+	validation_func "echo Error : change rtmp port, nginx reload"
+	echo -e "success-done"
+fi
+
+####################################################################################################
+####################### change http port [ httpupdate USER oldPORT newPORT ] #######################
+
+if [ ${Option} = "httpupdate" ]; then
+	ARGC_func 4 4
+	CHK_PORT1=`netstat -an | grep ":${4} "`
+	if [[ ${CHK_PORT1} ]]; then
+		echo -e "Error : http port in use."
+		exit -1
+	fi
+	sed -i "s/listen ${3}/listen ${4}/g" "${NGX_CONF}/${2}-http.http"
+	/bin/systemctl reload nginx.service
+	validation_func "echo Error : change http port, nginx reload"
+	echo -e "success-done"
+fi
+
+################################################################################################
+####################### change storage [ storageupdate USER newSTORAGE ] #######################
+####################### show storage [ storageshow USER ] ######################################
+
+if [ ${Option} = "storageupdate" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		/usr/sbin/setquota -u ${2} ${3}M ${3}M 0 0 / >/dev/null 2>&1
+#		validation_func "echo Error : update storage"
+	else
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp setquota user=${2} quota=${3} >/dev/null 2>&1
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "storageshow" ]; then
+	ARGC_func 2 2
+	if [ ! -f ${cPanel_chk} ]; then
+		du -s -m /home/${2}/uploads | awk {'print $1'}
+	else
+		du -s -m ${cPanel_USER}/${2}/uploads | awk {'print $1'}
+	fi
+
+#	SHOW_R=`/usr/sbin/repquota -a | grep "${2} " | awk '{print $3}' | head -1`
+#	validation_func "echo 0"
+#	if [[ ! ${SHOW_R} ]]; then
+#		echo "0"
+#		exit -1
+#	fi
+#	if [ $SHOW_R -lt 1024 ]; then
+#		Result=0
+#	else
+#		Result=`expr ${SHOW_R} / 1024`
+#		validation_func "echo Error : show storage in expr"
+#	fi
+#	echo "${Result}"
+fi
+
+#####################################################################################################
+####################### change bitrate [ bitrate USER oldBITRATE newBITRATE ] #######################
+
+if [ ${Option} = "bitrate" ]; then
+	ARGC_func 4 4
+#	sed -i "s/BANDWIDTH=${3}/BANDWIDTH=${4}/g" "${NGX_CONF}/${2}-rtmp.conf"
+#	if [ ${4} = "288" ]; then
+#		Resolution="_low"
+#	elif [ ${4} = "448" ]; then
+#		Resolution="_mid"
+#	elif [ ${4} = "1152" ]; then
+#		Resolution="_high"
+#	elif [ ${4} = "2048" ]; then
+#		Resolution="_hd720"
+#	elif [ ${4} = "4096" ]; then
+#		Resolution="_src"
+#	elif [ ${4} = "90000" ]; then
+#		Resolution="_src2"
+#	fi
+#	REP_=`cat ${NGX_CONF}/${2}-rtmp.conf | grep hls_variant | awk {'print $2'} | uniq`
+#	sed -i "s/${REP_}/${Resolution}/g" "${NGX_CONF}/${2}-rtmp.conf"
+#	/bin/systemctl reload nginx.service
+#	validation_func "echo Error : change bitrate, nginx reload"
+	echo -e "success-done"
+fi
+
+#######################################################################################
+####################### check stream process [ streamchk USER ] #######################
+####################### get stream playlist [ stplaylist USER ] #######################
+
+if [ ${Option} = "streamchk" ]; then
+	ARGC_func 2 2
+	ST_CHK=`ps -aux | grep ffmpegrun | grep -v "grep ${G_COLOR_}" | grep -v "utils streamchk ${2}" | grep -v "G_COLOR_=" | grep " ${2} " | grep -v "ffmpeg_func" | head -n 1`
+	if [[ ${ST_CHK} ]]; then
+		echo "stream-running"
+	else
+		echo "no-process"
+	fi
+fi
+
+if [ ${Option} = "stplaylist" ]; then
+	ARGC_func 2 2
+	ST_getplaylist=`ps -aux | grep ffmpegrun | grep -v "grep ${G_COLOR_}" | grep -v "G_COLOR_=" | grep -v "utils stplaylist ${2}" | grep " ${2} " | grep -v "ffmpeg_func" | head -n 1 | awk '{print $16}'`
+	echo ${ST_getplaylist}
+fi
+
+########################################################################
+####################### clear logs [ clearlogs ] #######################
+
+if [ ${Option} = "clearlogs" ]; then
+	M_SIZE=40000000  #40MB
+	if [ ! -f ${cPanel_chk} ]; then
+		COMM_LS=`ls /home/*/logs/ffmpeg.log`
+	else
+		COMM_LS=`ls ${cPanel_USER}/*/logs/ffmpeg.log`
+	fi
+	for i in ${COMM_LS}
+	do
+		F_SIZE=`stat -c%s ${i}`
+		if [ ${F_SIZE} -ge ${M_SIZE} ]; then
+			echo > ${i}
+			echo -e "logs has been cleared for ${i}"
+		fi
+	done
+
+	LOG_LIST=("/home/vdopanel/public_html/storage/logs/laravel.log" \
+		"/home/vdopanel/core/logs/domains-errors.log")
+	for DEL_F in "${LOG_LIST[@]}"
+	do
+		F_SIZE=`stat -c%s ${DEL_F}`
+		if [ ${F_SIZE} -ge ${M_SIZE} ]; then
+			echo > ${DEL_F}
+			echo -e "logs has been cleared for ${DEL_F}"
+		fi
+	done
+fi
+
+################################################################################
+####################### suspend account [ suspend USER ] #######################
+
+if [ ${Option} = "suspend" ]; then
+	ARGC_func 2 2
+	for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "utils suspend ${2}" | grep " ${2} " | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+	for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "utils suspend ${2}" | grep "/${2}/uploads" | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+	if [ ! -f ${cPanel_chk} ]; then
+		rm -rf /home/${2}/stream/hls/*
+		chmod 000 /home/${2}/live-streaming/hls
+		rm -rf /home/${2}/live-streaming/hls/*
+		/usr/sbin/usermod -s /bin/false ${2} >/dev/null 2>&1
+	else
+		rm -rf ${cPanel_USER}/${2}/stream/hls/*
+		chmod 000 ${cPanel_USER}/${2}/live-streaming/hls
+		rm -rf ${cPanel_USER}/${2}/live-streaming/hls/*
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp delftp user=${2} destroy=0 >/dev/null 2>&1
+	fi
+
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		mv ${NGX_CONF}/${2}-rtmp.conf ${NGX_CONF}/${2}-rtmp.conf_suspend
+	fi
+	mv ${NGX_CONF}/${2}-http.http ${NGX_CONF}/${2}-http_suspend.http
+	/bin/systemctl reload nginx.service
+	echo -e "success-done"
+fi
+
+####################################################################################
+####################### unsuspend account [ unsuspend USER ] #######################
+
+if [ ${Option} = "unsuspend" ]; then
+	ARGC_func 2 2
+	if [ ! -f ${cPanel_chk} ]; then
+		/usr/sbin/usermod -s /bin/bash ${2} >/dev/null 2>&1
+		chmod 777 /home/${2}/live-streaming/hls
+	else
+		chmod 777 ${cPanel_USER}/${2}/live-streaming/hls
+		FTP_PASS=`mysql ${DB_NAME} -e "SELECT ftp FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+		FTP_quot=`mysql ${DB_NAME} -e "SELECT station_storage FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+		/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp addftp user=${2} pass=${FTP_PASS} quota=${FTP_quot} homedir=users/${2}/uploads >/dev/null 2>&1
+	fi
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf_suspend ]; then
+		mv ${NGX_CONF}/${2}-rtmp.conf_suspend ${NGX_CONF}/${2}-rtmp.conf
+	fi
+	mv ${NGX_CONF}/${2}-http_suspend.http ${NGX_CONF}/${2}-http.http
+	/bin/systemctl reload nginx.service
+	echo -e "success-done"
+fi
+
+#########################################################################################
+####################### reset admin password [ resetadmin admin ] #######################
+
+if [ ${Option} = "resetadmin" ]; then
+	ARGC_func 2 2
+	if [[ $EUID -ne 0 ]]; then
+		echo "Must be run as root".
+		exit -1
+	fi
+	RAND_P1=`date +%s | sha256sum | base64 | head -c 12`
+	RAND_P2=`htpasswd -nbBC 10 USER ${RAND_P1} | cut -d":" -f2`
+	USER=`mysql ${DB_NAME} -e "SELECT name FROM users WHERE id='1'\G" | awk '{print $2}' | tr -d "1.\n"`
+	validation_func "echo Error : can not change password for admin.."
+	mysql ${DB_NAME} -e "UPDATE users SET password = '${RAND_P2}' WHERE id='1'"
+	validation_func "echo Error : can not change password for admin.."
+	echo -e "\nUser : ${USER}\nPassword : ${RAND_P1}\n"
+fi
+
+#############################################################################################################################
+####################### rebuild https conf for client domains [ rebuilddomain USER DOMAIN HTTP_PORT ] #######################
+####################### rebuild http conf for client domains [ rebuilddomain2 USER DOMAIN HTTP_PORT ] #######################
+####################### rebuild rtmp conf for broadcaster [ rebuildrtmp USER ] ##############################################
+
+REBUILD_FUNC()
+{
+	MAIN_DO=`cat /home/vdopanel/public_html/.env | grep APP_URL= | cut -d"/" -f3`
+	GEO_L=`cat ${NGX_CONF}/${2}-http* | grep geoip | awk '{print $NF}' | tr -d "()"`
+	FILE_REP=`ls ${NGX_CONF}/${2}-http*`
+	DOMAIN_LOCK=`egrep http_referer ${FILE_REP} | awk {'print $4'} | tr -d '")'`
+	DOMAIN_LOCK_ST=`cat ${FILE_REP} | grep "#return 500; #Domain_Lock"`
+	cat ${SOU_CONF}/${1} > ${FILE_REP}
+	sed -i "s/_USER_/${2}/g" "${FILE_REP}"
+	sed -i "s/_DOMAIN_/${3}/g" "${FILE_REP}"
+	sed -i "s/_DOMAIN2_/${MAIN_DO}/g" "${FILE_REP}"
+	sed -i "s/_PORT_/${4}/g" "${FILE_REP}"
+	sed -i "s/_NONE_/${GEO_L}/g" "${FILE_REP}"
+	if [[ ${DOMAIN_LOCK} ]]; then
+		REP1=`egrep http_referer ${FILE_REP} | awk {'print $4'} | tr -d '")'`
+		sed -i "s/${REP1}/${DOMAIN_LOCK}/g" "${FILE_REP}"
+		if [[ ! ${DOMAIN_LOCK_ST} ]]; then
+			sed -i "/#Domain_Lock/c\           return 500; #Domain_Lock" "${FILE_REP}"
+		fi
+	fi
+	/bin/systemctl reload nginx.service
+	validation_func "echo Error : rebuild http conf, nginx reload"
+	echo -e "success-done"
+	CHK_LOADB_users=`mysql ${DB_NAME} -e "SELECT loadb FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+	if [[ ${CHK_LOADB_users} == 1 ]]; then
+		/home/vdopanel/core/utils loadbrebuild
+	fi
+}
+if [ ${Option} = "rebuilddomain" ]; then
+	ARGC_func 4 4
+	if [ ! -f ${cPanel_chk} ]; then
+		REBUILD_FUNC "nginx-user-http_ssl.conf" ${2} ${3} ${4}
+	else
+		REBUILD_FUNC "nginx-user-http_ssl_cpanel.conf" ${2} ${3} ${4}
+	fi
+fi
+
+if [ ${Option} = "rebuilddomain2" ]; then
+	ARGC_func 4 4
+	if [ ! -f ${cPanel_chk} ]; then
+		REBUILD_FUNC "nginx-user-http.conf" ${2} ${3} ${4}
+	else
+		REBUILD_FUNC "nginx-user-http_cpanel.conf" ${2} ${3} ${4}
+	fi
+fi
+
+if [ ${Option} = "rebuildrtmp" ]; then
+	ARGC_func 2 2
+	ls ${NGX_CONF}/${2}-rtmp.conf* >/dev/null 2>&1
+	validation_func "echo Error : rtmp config file not exists."
+	RTMP_FILE=`ls ${NGX_CONF}/${2}-rtmp.conf*`
+	Social_Y_1=`egrep youtube-pclive-stream ${RTMP_FILE}`
+	Social_Y_2=`egrep youtube-webtv-stream ${RTMP_FILE}`
+	Social_F_1=`egrep facebook-pclive-stream ${RTMP_FILE}`
+	Social_F_2=`egrep facebook-webtv-stream ${RTMP_FILE}`
+	Social_T_1=`egrep twitch-pclive-stream ${RTMP_FILE}`
+	Social_T_2=`egrep twitch-webtv-stream ${RTMP_FILE}`
+	Social_P_1=`egrep periscope-pclive-stream ${RTMP_FILE}`
+	Social_P_2=`egrep periscope-webtv-stream ${RTMP_FILE}`
+	Social_D_1=`egrep dailymotion-pclive-stream ${RTMP_FILE}`
+	Social_D_2=`egrep dailymotion-webtv-stream ${RTMP_FILE}`
+	Social_C_1=`egrep custom-pclive-stream ${RTMP_FILE}`
+	Social_C_1=${Social_C_1////\\/}
+	Social_C_2=`egrep custom-webtv-stream ${RTMP_FILE}`
+	Social_C_2=${Social_C_2////\\/}
+	RTMP_PORT=`egrep listen ${RTMP_FILE} | awk {'print $2'} | tr -d ";"`
+#	Resolution=`egrep hls_variant ${RTMP_FILE} | head -1 | awk {'print $2'}`
+#	Bitrate=`egrep hls_variant ${RTMP_FILE} | head -1 | awk {'print $3'} | cut -d "=" -f2 | tr -d ";"`
+	PUB_IP_CHK=`egrep "allow publish" ${RTMP_FILE} | awk {'print $3'} | tr -d ";" | grep -v 127.0.0.1 | grep -v ${SERV_IP}`
+	RECORD_CHK=`egrep "#record off; #RecordLive" ${RTMP_FILE}`
+	REC_ST="off"
+	if [[ ${RECORD_CHK} ]]; then
+		REC_ST="on"
+	fi
+
+	RTMP_auth_chk=`egrep rtmp-auth ${RTMP_FILE}`
+	if [[ ${RTMP_auth_chk} ]]; then
+		cat /home/vdopanel/core/conf-templates/nginx-user-rtmp_psk.conf > ${RTMP_FILE}
+	else
+		cat /home/vdopanel/core/conf-templates/nginx-user-rtmp.conf > ${RTMP_FILE}
+		if [[ ${PUB_IP_CHK} ]]; then
+			sed -i "s/_publish_IP_/${PUB_IP_CHK}/g" "${RTMP_FILE}"
+		fi
+		sed -i "s/_publish_IP_/${SERV_IP}/g" "${RTMP_FILE}"
+	fi
+
+	if [ ${REC_ST} = "on" ]; then
+		sed -i "/record off; #RecordLive/c\              #record off; #RecordLive" "${RTMP_FILE}"
+	fi
+
+	if [ -f ${cPanel_chk} ]; then
+		REP_USER="vdopanel\/users\/${2}"
+		sed -i "s/home\/_USER_/home\/${REP_USER}/g" "${RTMP_FILE}"
+	fi
+	sed -i "s/_PORT_/${RTMP_PORT}/g" "${RTMP_FILE}"
+	sed -i "s/_USER_/${2}/g" "${RTMP_FILE}"
+	sed -i "s/_SERV_IP_/${SERV_IP}/g" "${RTMP_FILE}"
+#	sed -i "s/_Resolution_/${Resolution}/g" "${RTMP_FILE}"
+#	sed -i "s/_BitRate_/${Bitrate}/g" "${RTMP_FILE}"
+	sed -i "/youtube-pclive-stream/c\\${Social_Y_1}" "${RTMP_FILE}"
+	sed -i "/youtube-webtv-stream/c\\${Social_Y_2}" "${RTMP_FILE}"
+	sed -i "/facebook-pclive-stream/c\\${Social_F_1}" "${RTMP_FILE}"
+	sed -i "/facebook-webtv-stream/c\\${Social_F_2}" "${RTMP_FILE}"
+	sed -i "/twitch-pclive-stream/c\\${Social_T_1}" "${RTMP_FILE}"
+	sed -i "/twitch-webtv-stream/c\\${Social_T_2}" "${RTMP_FILE}"
+	sed -i "/periscope-pclive-stream/c\\${Social_P_1}" "${RTMP_FILE}"
+	sed -i "/periscope-webtv-stream/c\\${Social_P_2}" "${RTMP_FILE}"
+	sed -i "/dailymotion-pclive-stream/c\\${Social_D_1}" "${RTMP_FILE}"
+	sed -i "/dailymotion-webtv-stream/c\\${Social_D_2}" "${RTMP_FILE}"
+	if [[ ${Social_C_1} ]]; then
+		sed -i "/custom-pclive-stream/c\\${Social_C_1}" "${RTMP_FILE}"
+		sed -i "/custom-webtv-stream/c\\${Social_C_2}" "${RTMP_FILE}"
+	fi
+
+	B_TYPE=`mysql ${DB_NAME} -e "SELECT B_type FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tr -d "1.\n"`
+	if [[ ${B_TYPE} != 3 ]]; then
+		sed -i "/push-to-hybrid/c\            # push-to-hybrid" "${RTMP_FILE}"
+	fi
+
+	STREAM_TYPE=`mysql ${DB_NAME} -e "SELECT stream_type FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+	STREAM_MULTI=`mysql ${DB_NAME} -e "SELECT stream_multi FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+	if [[ ${STREAM_TYPE} == "multi" ]]; then
+		Multi_ST_1=""
+		Multi_ST_2=""
+		Multi_ST_3=""
+		Multi_ST_4=""
+		Multi_ST_5=""
+		PUSH_SRC=""
+		if [[ ${STREAM_MULTI} == *"288"* ]]; then
+			sed -i "s/#hls_variant _240/hls_variant _240/g" "${RTMP_FILE}"
+			Multi_ST_1="-c:v libx264 -c:a aac -b 288k -maxrate 288k -bufsize 288k -vf scale=480:trunc(ow/a/2)*2 -tune zerolatency -preset superfast -crf 23 -f flv rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_240\n"
+		fi
+		if [[ ${STREAM_MULTI} == *"448"* ]]; then
+			sed -i "s/#hls_variant _360/hls_variant _360/g" "${RTMP_FILE}"
+			Multi_ST_2="-c:v libx264 -c:a aac -b 448k -maxrate 448k -bufsize 448k -vf scale=720:trunc(ow/a/2)*2 -tune zerolatency -preset superfast -crf 23 -f flv rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_360\n"
+		fi
+		if [[ ${STREAM_MULTI} == *"1152"* ]]; then
+			sed -i "s/#hls_variant _480/hls_variant _480/g" "${RTMP_FILE}"
+			Multi_ST_3="-c:v libx264 -c:a aac -b 1152k -maxrate 1152k -bufsize 1152k -vf scale=960:trunc(ow/a/2)*2 -tune zerolatency -preset superfast -crf 23 -f flv rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_480\n"
+		fi
+		if [[ ${STREAM_MULTI} == *"2048"* ]]; then
+			sed -i "s/#hls_variant _720/hls_variant _720/g" "${RTMP_FILE}"
+			Multi_ST_4="-c:v libx264 -c:a aac -b 2048k -maxrate 2048k -bufsize 2048k -vf scale=1280:trunc(ow/a/2)*2 -tune zerolatency -preset superfast -crf 23 -f flv rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_720\n"
+		fi
+		if [[ ${STREAM_MULTI} == *"4096"* ]]; then
+			sed -i "s/#hls_variant _1080/hls_variant _1080/g" "${RTMP_FILE}"
+			Multi_ST_5="-c:v libx264 -c:a aac -b 4096k -maxrate 4096k -bufsize 4096k -vf scale=1920:trunc(ow/a/2)*2 -tune zerolatency -preset superfast -crf 23 -f flv rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_1080"
+		fi
+                if [[ ${STREAM_MULTI} == *"90000"* ]]; then
+			sed -i "s/#hls_variant _src/hls_variant _src/g" "${RTMP_FILE}"
+			PUSH_SRC="            push rtmp://127.0.0.1:${RTMP_PORT}/multi_live/play_src;\n"
+		fi
+		Multi_ST_M="            exec ffmpeg -re -i rtmp://127.0.0.1:${RTMP_PORT}/\$app/\$name\n"
+		Multi_ST_ALL="${Multi_ST_M} ${Multi_ST_1} ${Multi_ST_2} ${Multi_ST_3} ${Multi_ST_4} ${Multi_ST_5}"
+		sed -i "/Multi_bitrate/c\\${PUSH_SRC}${Multi_ST_ALL};" "${RTMP_FILE}"
+		
+	fi
+
+	/bin/systemctl reload nginx.service
+	validation_func "echo Error : rebuild rtmp conf, nginx reload"
+	echo "success-done"
+	CHK_LOADB_users=`mysql ${DB_NAME} -e "SELECT loadb FROM broadcasters WHERE name='${2}'\G" | awk '{print $2}' | tail -1`
+	if [[ ${CHK_LOADB_users} == 1 ]]; then
+		/home/vdopanel/core/utils loadbrebuild
+	fi
+fi
+
+##################################################################################################
+####################### bandwidth update [ bandwidthupdate USER PORT TIME ] ######################
+####################### bandwidth reset [ bandwidthreset all ] ###################################
+####################### bandwidth show [ bandwidthshow USER ] ####################################
+####################### bandwidth show [ bandwidthshow all ] #####################################
+####################### bandwidth check process [ bandwcheck all ] ###############################
+####################### bandwidth kill process [ killbandw USER PORT] ############################
+
+if [ ${Option} = "bandwidthupdate" ]; then
+	ARGC_func 4 4
+	while true
+	do
+		KILL_OLD_P=`ps -aux | grep iftop | grep -v "grep ${G_COLOR_}" | grep -v "\-c" | grep ${3} | awk '{print $2}'`
+		for i in ${KILL_OLD_P}
+		do
+			kill -9 ${i}
+		done
+		/usr/sbin/iftop -P -N -n -t  -f "port ${3}" -s ${4} 2>/dev/null | grep Cumulative > /home/vdopanel/core/tmp/bandw/bandw-${3}
+		RESULT_1=`cat /home/vdopanel/core/tmp/bandw/bandw-${3} | grep Cumulative | sed 's/  */ /g' | awk '{print $NF}'`
+		RESULT_2=`cat /home/vdopanel/core/tmp/bandw/bandw-${3} | grep Cumulative | sed 's/  */ /g' | awk '{print $NF}' | tr -d "KMGB"`
+		if [ ! -f ${cPanel_chk} ]; then
+			Bandw_F=`cat /home/${2}/data/bandwidth | head -n 1`
+			Bandw_FILE="/home/${2}/data/bandwidth"
+		else
+			Bandw_F=`cat ${cPanel_USER}/${2}/data/bandwidth | head -n 1`
+			Bandw_FILE="${cPanel_USER}/${2}/data/bandwidth"
+		fi
+
+		if [[ ${RESULT_1} == *"KB"* ]]; then
+			Conv2MB=$( echo "scale=3; ${RESULT_2} / 1000" | bc )
+			Calc=$( echo "${Conv2MB} + ${Bandw_F}" | bc )
+			echo ${Calc} > ${Bandw_FILE}
+		elif [[ ${RESULT_1} == *"MB"* ]]; then
+			Calc=$( echo "${RESULT_2} + ${Bandw_F}" | bc )
+			echo ${Calc} > ${Bandw_FILE}
+		elif [[ ${RESULT_1} == *"GB"* ]]; then
+			Conv2MB=$( echo "${RESULT_2} * 1000" | bc )
+			Calc=$( echo "${Conv2MB} + ${Bandw_F}" | bc )
+			echo ${Calc} > ${Bandw_FILE}
+		fi
+	done
+fi
+
+if [ ${Option} = "bandwidthreset" ]; then
+	ARGC_func 2 2
+	if [ ! -f ${cPanel_chk} ]; then
+		COMM_LS=`ls /home/*/data/bandwidth`
+		USER_PATH="/home"
+	else
+		COMM_LS=`ls ${cPanel_USER}/*/data/bandwidth`
+		USER_PATH=${cPanel_USER}
+	fi
+	for i in ${COMM_LS}
+	do
+		echo "0" > ${i}
+	done
+
+	CONF_F=`ls ${NGX_CONF}/*-http*`
+	if [[ ${CONF_F} ]]; then
+		for i in ${CONF_F}
+		do
+			GET_USER=`cat ${i} | grep alias | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+			LogDate=`date --date='-1 month' +'%B-%Y'`
+			mv -f ${USER_PATH}/${GET_USER}/logs/access.log ${USER_PATH}/${GET_USER}/logs/statistics/${LogDate}
+			mv -f ${USER_PATH}/${GET_USER}/logs/statistics.html ${USER_PATH}/${GET_USER}/logs/statistics/${LogDate}.html
+			/bin/systemctl reload nginx.service
+			DATE_IN_L=`date '+%b/%Y'`
+			echo -e "127.0.0.1 - - [1/${DATE_IN_L}:01:00:00 +0000] \"GET /stream/play.m3u8 HTTP/1.1\" 304 0 \"http://127.0.0.1/broadcaster/${GET_USER}/stream/player\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:85.0) Gecko/20100101 Firefox/85.0\"" > ${USER_PATH}/${GET_USER}/logs/access.log
+			chown -R vdopanel.vdopanel ${USER_PATH}/${GET_USER}/logs/access.log
+		done
+	fi
+	
+fi
+
+if [ ${Option} = "bandwidthshow" ]; then
+	ARGC_func 2 2
+	if [ ${2} = "all" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			COMM_CAT=`cat /home/*/data/bandwidth`
+		else
+			COMM_CAT=`cat ${cPanel_USER}/*/data/bandwidth`
+		fi
+		COUNT=0
+		for i in ${COMM_CAT}
+		do
+			COUNT=$( echo "${COUNT} + ${i}" | bc )
+		done
+		RES=`echo "${COUNT}" | cut -d"." -f1`
+		echo ${RES}
+		exit -1
+	fi
+
+
+	if [ ! -f ${cPanel_chk} ]; then
+		COMM_RES="/home/${2}/data/bandwidth"
+	else
+		COMM_RES="${cPanel_USER}/${2}/data/bandwidth"
+	fi
+	RESULT=`cat ${COMM_RES} | head -n 1 | cut -d"." -f1`
+	if [[ ${RESULT} ]]; then
+		echo ${RESULT}
+	else
+		echo "0"
+	fi
+fi
+
+if [ ${Option} = "bandwcheck" ]; then
+	ARGC_func 2 2
+	
+	CONF_F=`ls ${NGX_CONF}/*-http.http`
+	if [[ ${CONF_F} ]]; then
+		for i in ${CONF_F}
+		do
+			GET_USER=`cat ${i} | grep alias | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+			H_PORT=`cat ${i} | grep listen | awk '{print $2}'`
+			CHK_PORT=`ps aux | grep bandwidthupdate | grep ${H_PORT} | grep ${GET_USER} | grep -v "grep ${G_COLOR_}" | awk '{print $2}'`
+			if [[ ! ${CHK_PORT} ]]; then
+				/home/vdopanel/core/utils bandwidthupdate ${GET_USER} ${H_PORT} 60 </dev/null >/dev/null 2>&1 &
+			fi
+		done
+	fi
+
+	CONF_F_S=`ls ${NGX_CONF}/*-http_suspend.http`
+	if [[ ${CONF_F_S} ]]; then
+		for i2 in ${CONF_F_S}
+		do
+			USER=`cat ${i2} | grep alias | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+			H_PORT_K=`cat ${i2} | grep listen | awk '{print $2}'`
+			/home/vdopanel/core/utils killbandw ${USER} ${H_PORT_K}
+		done
+	fi
+
+
+	CONF_F=`ls ${NGX_CONF}/*-rtmp.conf`
+	if [[ ${CONF_F} ]]; then
+		for i in ${CONF_F}
+		do
+			GET_USER=`cat ${i} | grep hls_path | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+			RTMP_PORT=`cat ${i} | grep listen | awk '{print $2}' | tr -d ";"`
+			CHK_PORT=`ps aux | grep bandwidthupdate | grep ${RTMP_PORT} | grep ${GET_USER} | grep -v "grep ${G_COLOR_}" | awk '{print $2}'`
+			if [[ ! ${CHK_PORT} ]]; then
+				/home/vdopanel/core/utils bandwidthupdate ${GET_USER} ${RTMP_PORT} 80 </dev/null >/dev/null 2>&1 &
+			fi
+		done
+	fi
+
+	CONF_F_S=`ls ${NGX_CONF}/*-rtmp.conf_suspend`
+	if [[ ${CONF_F_S} ]]; then
+		for i2 in ${CONF_F_S}
+		do
+			USER=`cat ${i2} | grep hls_path | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+			RTMP_PORT_K=`cat ${i2} | grep listen | awk '{print $2}' | tr -d ";"`
+			/home/vdopanel/core/utils killbandw ${USER} ${RTMP_PORT_K}
+		done
+	fi
+fi
+
+if [ ${Option} = "killbandw" ]; then
+	ARGC_func 3 3
+	for i in `ps -aux | grep bandwidthupdate | grep -v "grep ${G_COLOR_}" | grep -v "utils killbandw ${2}" | grep ${2} | grep ${3} | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+	echo -e "success-done"
+fi
+
+##################################################################################################################################
+####################### update viewer limit [ vlimitupdate HTTP_PORT RTMP_PORT vLIMIT IPLOCK_STATUS USER ] #######################
+
+if [ ${Option} = "vlimitupdate" ]; then
+	ARGC_func 6 6
+	F_CHK=`/usr/sbin/iptables -L -n -v --line-numbers | grep "${2},${3}" | grep reject-with | awk '{print $1}'`
+	if [[ ${F_CHK} ]]; then
+		/usr/sbin/iptables -D INPUT ${F_CHK} >/dev/null 2>&1
+	fi
+	if [ ${4} != 0 ]; then
+		if [[ ${5} == 1 ]]; then
+			IPTA_LIST=`/usr/sbin/iptables -L -n -v --line-numbers | grep "${2},${3}" | grep -v "reject-with" | tac | awk {'print $1'}`
+			for i in ${IPTA_LIST}
+			do
+				/usr/sbin/iptables -D INPUT ${i}
+			done
+		fi
+
+		/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${2},${3} -m connlimit --connlimit-above ${4} --connlimit-mask 0 -j REJECT
+		validation_func "echo Error : when update viewer limit"
+
+		if [[ ${5} == 1 ]]; then
+			/home/vdopanel/core/utils iplock on ${6} ${2} ${3} >/dev/null 2>&1
+		fi
+	fi
+
+	service iptables save >/dev/null 2>&1
+	echo -e "success-done"
+fi
+
+######################################################################################
+####################### viewer count [ viewercount HTTP_PORT RTMP_PORT] ##############
+####################### viewer count [ viewercount all ] #############################
+
+if [ ${Option} = "viewercount" ]; then
+#	ARGC_func 2 2
+	if [ ${2} = "all" ]; then
+		COUNT_1=0
+		CONF_F1=`ls ${NGX_CONF}/*-http.http`
+		for i in ${CONF_F1}
+		do
+			H_PORT=`cat ${i} | grep listen | awk '{print $2}'`
+			V_COUNT_1=`netstat -an | grep ${H_PORT} | grep ESTABLISHED | awk '{print $5}' | cut -d":" -f1 | wc -l`
+			COUNT_1=$(echo "${COUNT_1} + ${V_COUNT_1}" | bc)
+		done
+
+		COUNT_2=0
+		CONF_F2=`ls ${NGX_CONF}/*-rtmp.conf`
+		for i in ${CONF_F2}
+		do
+			R_PORT=`cat ${i} | grep listen | awk '{print $2}' | tr -d ";"`
+			V_COUNT_2=`netstat -an | grep ${R_PORT} | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | wc -l`
+			COUNT_2=$(echo "${COUNT_2} + ${V_COUNT_2}" | bc)
+		done
+
+		TOTAL_CA=$( echo "${COUNT_1} + ${COUNT_2}" | bc )
+		echo ${TOTAL_CA}
+		exit -1
+	fi
+
+	V_COUNT_HTTP=`netstat -an | grep ${2} | grep ESTABLISHED | awk '{print $5}' | cut -d":" -f1 | wc -l`
+	V_COUNT_RTMP=`netstat -an | grep ${3} | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | wc -l`
+	TOTAL_CB=$( echo "${V_COUNT_HTTP} + ${V_COUNT_RTMP}" | bc )
+	echo ${TOTAL_CB}
+fi
+
+##############################################################################
+####################### CPU options [ cpu percentage ] #######################
+####################### CPU options [ cpu load ] #############################
+
+if [ ${Option} = "cpu" ]; then
+	ARGC_func 2 2
+	if [ ${2} = "percentage" ]; then
+		INFO=`/usr/bin/top -b -n1 | grep "Cpu(s)" | awk '{print $8}' | cut -d"." -f1`
+		if [ ${INFO} = "id," ]; then
+			echo "1"
+			exit -1
+		fi
+		RES=$(echo "100 - ${INFO}" | bc)
+		echo ${RES}
+
+	elif [ ${2} = "load" ]; then
+		uptime | awk {'print $(NF-2), $(NF-1), $NF'}
+	fi
+fi
+
+###################################################################################################
+####################### geo block country options [ geoblock USER COUNTRY ] #######################
+####################### geo block country options [ geoblockshow USER ] ###########################
+
+if [ ${Option} = "geoblock" ]; then
+	ARGC_func 3 3
+	CONVERT=${3//-/|}
+	REP=`cat ${NGX_CONF}/${2}-http.http | grep geoip | awk '{print $NF}' | tr -d "()"`
+	sed -i "s/${REP}/${CONVERT}/g" "${NGX_CONF}/${2}-http.http"
+	/bin/systemctl reload nginx.service
+	validation_func "echo Error : geoblock, nginx reload"
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "geoblockshow" ]; then
+	ARGC_func 2 2
+	RESULT=`cat ${NGX_CONF}/${2}-http.http | grep geoip | awk '{print $NF}' | tr -d "()"`
+	RESULT=${RESULT//|/,}
+	echo ${RESULT}
+fi
+
+######################################################################################
+####################### files user owner options [ chown all ] #######################
+
+if [ ${Option} = "chown" ]; then
+	ARGC_func 2 2
+	for i in `ls /home`
+	do
+		if [ ! -f ${cPanel_chk} ]; then
+			if [ -d /home/${i}/uploads ]; then
+				FOLDERS=`find /home/${i}/uploads -type d`
+				for chm in ${FOLDERS}
+				do
+					chmod 777 ${chm}
+				done
+				chown -R ${i}.vdopanel /home/${i}/uploads
+				chown -R ${i}.vdopanel /home/${i}/logs
+				chmod 777 /home/${i}/logs/statistics
+				chown -R vdopanel.vdopanel /home/${i}/playlist/*
+				chown -R vdopanel.vdopanel /home/${i}/imgs/*
+			fi
+		else
+			chown -R vdopanel.vdopanel ${cPanel_USER}
+		fi
+	done
+fi
+
+###############################################################################
+####################### license suspend [ license off ] #######################
+####################### license suspend [ license on ] ########################
+
+if [ ${Option} = "license" ]; then
+	ARGC_func 2 2
+	if [ ${2} = "off" ]; then
+		for i in `ps -A | grep ffmpeg | awk {'print $1'}`
+		do
+			kill -9 ${i}
+		done
+		if [ ! -f ${cPanel_chk} ]; then
+			rm -rf /home/*/stream/hls/*
+			rm -rf /home/*/live-streaming/hls/*
+		else
+			rm -rf ${cPanel_USER}/*/stream/hls/*
+			rm -rf ${cPanel_USER}/*/live-streaming/hls/*
+		fi
+		CONF_F=`ls ${NGX_CONF}/*-rtmp.conf 2>/dev/null`
+		validation_func "echo -e success-done-1"
+		if [[ ${CONF_F} ]]; then
+			for i in ${CONF_F}
+			do
+				mv ${i} ${i}_License_off
+			done
+		fi
+		/bin/systemctl reload nginx.service
+		for i in `ps -aux | grep "core\/ffmpegrun" | grep -v "grep ${G_COLOR_}" | awk '{print $2}'`
+		do
+			kill -9 ${i}
+		done
+		echo -e "success-done"
+
+	elif [ ${2} = "on" ]; then
+		CONF_F=`ls ${NGX_CONF}/*-rtmp.conf_License_off 2>/dev/null`
+		validation_func "echo -e success-done-1"
+		if [[ ${CONF_F} ]]; then
+			for i in ${CONF_F}
+			do
+				CONF_BACK=`echo ${i} | cut -d"_" -f1`
+				mv ${i} ${CONF_BACK}
+			done
+
+			/bin/systemctl reload nginx.service
+		fi
+		/bin/systemctl reload nginx.service
+		echo -e "success-done"
+	fi
+fi
+
+#######################################################################
+####################### server IP [ server ip ] #######################
+
+if [ ${Option} = "server" ]; then
+	ARGC_func 2 2
+	echo ${SERV_IP}
+fi
+
+#########################################################################################
+####################### install phpmyadmin [ phpmyadmin install ] #######################
+
+if [ ${Option} = "phpmyadmin" ]; then
+	ARGC_func 2 2
+	if [ ! -f ${cPanel_chk} ]; then
+		if [ -d /usr/share/phpMyAdmin ]; then
+			echo -e "phpmyadmin already installed."
+			exit -1
+		fi
+		cd /usr/local/src
+		wget https://files.phpmyadmin.net/phpMyAdmin/4.9.4/phpMyAdmin-4.9.4-all-languages.zip >/dev/null 2>&1
+		validation_func "echo Error : when download phpMyAdmin files"
+		unzip -q phpMyAdmin-4.9.4-all-languages.zip
+		rm -rf phpMyAdmin-4.9.4-all-languages.zip
+		mv phpMyAdmin-4.9.4-all-languages /usr/share/phpMyAdmin
+		mv /usr/share/phpMyAdmin/config.sample.inc.php /usr/share/phpMyAdmin/config.inc.php
+		chown -R vdopanel.vdopanel /var/lib/php/session
+		mkdir -p /usr/share/phpMyAdmin/tmp
+		chown -R vdopanel.vdopanel /usr/share/phpMyAdmin/tmp
+		PASSWORD=`head /dev/urandom | tr -dc A-Za-z0-9 | head -c 50`
+		sed -i "s/blowfish_secret'] = ''/blowfish_secret'] = '${PASSWORD}'/g" "/usr/share/phpMyAdmin/config.inc.php"
+		/bin/systemctl reload nginx.service
+		/bin/systemctl restart php-fpm.service
+		ln -s /usr/share/phpMyAdmin/ /home/vdopanel/public_html/public/ >/dev/null 2>&1
+		echo -e "\n\n\033[32m phpmyadmin URL : http://${SERV_IP}/phpMyAdmin\033[0m\n\n"
+	else
+		echo -e "\nphpmyadmin already installed with cpanel server.\n"
+	fi
+fi
+
+##########################################################################
+####################### check update [ update check ] ####################
+####################### check update [ update do ] #######################
+
+if [ ${Option} = "update" ]; then
+	ARGC_func 2 2
+	URL_UP="https://vdopanel.com/dist"
+	CHK_VER_LOCAL=`cat /home/vdopanel/public_html/.env | grep APP_VERSION= | cut -d"=" -f2`
+	CHK_VER_ONLINE=`curl -s ${URL_UP}/ver.txt`
+	update_chk_func()
+	{
+	 if [ ${CHK_VER_LOCAL} = ${CHK_VER_ONLINE} ]; then
+		echo -e "0,Your Software Version ${CHK_VER_LOCAL} up-to-date."
+		exit -1
+	 fi
+	}
+	if [ ${2} = "check" ]; then
+		update_chk_func
+		echo "1,${CHK_VER_ONLINE},There new version ${CHK_VER_ONLINE} of VDOPanel is available.\nRun this command to start update : vdopanel update"
+
+	elif [ ${2} = "do" ]; then
+		update_chk_func
+		TMP_DIR="/home/vdopanel/core/tmp"
+		LOG_DIR="/home/vdopanel/core/logs/update.log"
+		if [ -f ${TMP_DIR}/upgrade.bin ]; then
+			echo "There is already an update process running now"
+			exit -1
+		fi
+		echo > ${LOG_DIR}
+		cd ${TMP_DIR}
+		validation_func "echo Error : tmp path not exists."
+		wget ${URL_UP}/upgrade.bin >/dev/null 2>&1
+		validation_func "echo Error : When get upgrade source."
+		chmod +x ${TMP_DIR}/upgrade.bin >/dev/null 2>&1
+		${TMP_DIR}/upgrade.bin
+		rm -rf ${TMP_DIR}/upgrade.bin
+	fi
+fi
+
+##############################################################################################
+####################### bandwidth suspend - unsuspend [ bandw action ] #######################
+
+if [ ${Option} = "bandw" ]; then
+	ARGC_func 2 2
+	if [ ! -f ${cPanel_chk} ]; then
+		COMM_LS=`ls /home/*/data/bandwidth`
+	else
+		COMM_LS=`ls ${cPanel_USER}/*/data/bandwidth`
+	fi
+	for i in ${COMM_LS}
+	do
+		if [ ! -f ${cPanel_chk} ]; then
+			USER=`echo ${i} | cut -d"/" -f3`
+		else
+			USER=`echo ${i} | cut -d"/" -f5`
+		fi
+		Bandw_V=`cat ${i} | head -n 1 | cut -d"." -f1`
+		BANDW_L=`mysql ${DB_NAME} -e "SELECT traffic_month FROM broadcasters WHERE name='${USER}'\G" | awk '{print $2}' | tail -1`
+		if [[ ${BANDW_L} != 0 ]]; then
+			if [[ ${Bandw_V} -gt ${BANDW_L} ]]; then
+				if [ ! -f ${NGX_CONF}/${USER}-rtmp.conf_bandwhold ]; then
+					mv ${NGX_CONF}/${USER}-rtmp.conf ${NGX_CONF}/${USER}-rtmp.conf_bandwhold
+					/bin/systemctl reload nginx.service
+					for Kill in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep ${USER} | awk '{print $2}'`
+					do
+						kill -9 ${Kill}
+					done
+
+					if [ ! -f ${cPanel_chk} ]; then
+						rm -rf /home/${USER}/stream/hls/*
+						rm -rf /home/${USER}/live-streaming/hls/*
+					else
+						rm -rf ${cPanel_USER}/${USER}/stream/hls/*
+						rm -rf ${cPanel_USER}/${USER}/live-streaming/hls/*
+					fi
+					mysql ${DB_NAME} -e "UPDATE broadcasters SET traffic_hold = '1' WHERE name='${USER}'"
+					echo -e "User : ${USER} has been hold."
+				fi
+			else
+				if [ -f ${NGX_CONF}/${USER}-rtmp.conf_bandwhold ]; then
+					mv ${NGX_CONF}/${USER}-rtmp.conf_bandwhold ${NGX_CONF}/${USER}-rtmp.conf
+					/bin/systemctl reload nginx.service
+					mysql ${DB_NAME} -e "UPDATE broadcasters SET traffic_hold = '0' WHERE name='${USER}'"
+					echo -e "User : ${USER} has been unhold."
+				fi
+			fi
+		else
+			if [ -f ${NGX_CONF}/${USER}-rtmp.conf_bandwhold ]; then
+				mv ${NGX_CONF}/${USER}-rtmp.conf_bandwhold ${NGX_CONF}/${USER}-rtmp.conf
+				/bin/systemctl reload nginx.service
+				mysql ${DB_NAME} -e "UPDATE broadcasters SET traffic_hold = '0' WHERE name='${USER}'"
+				echo -e "User : ${USER} has been unhold."
+			fi
+		fi
+	done
+fi
+
+########################################################################################################
+####################### filemanager replace spaces [ filemanager spacerep USER ] #######################
+####################### filemanager get video files [ filemanager getlist USER ] #######################
+
+if [ ${Option} = "filemanager" ]; then
+	ARGC_func 3 3
+	if [ ${2} = "spacerep" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			UP_PATH="/home/${3}/uploads"
+		else
+			UP_PATH="${cPanel_USER}/${3}/uploads"
+		fi
+
+		FIND_S1_DIR=`find ${UP_PATH} -type d \( -name "* *" -o -name "*&*" -o -name "*,*" -o -name "*#*" -o -name "*?*" \)`
+		FIND_S1_FIL=`find ${UP_PATH} -type f \( -name "* *" -o -name "*&*" -o -name "*,*" -o -name "*#*" -o -name "*?*" \)`
+
+		IFS=$'\n'
+		for i in ${FIND_S1_DIR}
+		do
+			mv "${i}" `echo "${i}" | tr ' &,#?' '-'` >/dev/null 2>&1
+		done
+		for i in ${FIND_S1_FIL}
+		do
+			mv "${i}" `echo "${i}" | tr ' &,#?' '-'` >/dev/null 2>&1
+		done
+	fi
+
+	if [ ${2} = "getlist" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			find /home/${3}/uploads/ -type f | grep -v ".ftpquota" | grep -v "/Live_Recorders/" | grep -v "/YouTube_Downloads/"
+			mkdir -p /home/${3}/uploads/Live_Recorders
+			chmod 777 /home/${3}/uploads/Live_Recorders
+			chown -R ${3}.vdopanel /home/${3}/uploads/Live_Recorders
+		else
+			find ${cPanel_USER}/${3}/uploads/ -type f | grep -v ".ftpquota" | grep -v "/Live_Recorders/" | grep -v "/YouTube_Downloads/"
+			mkdir -p ${cPanel_USER}/${3}/uploads/Live_Recorders
+			chown -R vdopanel.vdopanel ${cPanel_USER}/${3}/uploads/Live_Recorders
+		fi
+	fi
+fi
+
+#########################################################################################################################
+####################### Get info for playlist, video file and status [ getstinfo USER RTMP_PORT ] #######################
+
+if [ ${Option} = "getstinfo" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		GET_STATUS=`ls /home/${2}/stream/*/*.m3u8 2>/dev/null;ls /home/${2}/live-streaming/*/*.m3u8 2>/dev/null`
+	else
+		GET_STATUS=`ls ${cPanel_USER}/${2}/stream/*/*.m3u8 2>/dev/null;ls ${cPanel_USER}/${2}/live-streaming/*/*.m3u8 2>/dev/null`
+	fi
+	if [[ ${GET_STATUS} ]]; then
+		GET_STATUS="Live"
+	else
+		GET_STATUS="Offline"
+	fi
+
+	GET_PLIST=`ps aux | grep ffmpegrun | grep -v "grep ${G_COLOR_}" | grep "sudo \/home" | grep ${2} | grep ${3} | awk '{print $16}' | uniq`
+	if [[ ! ${GET_PLIST} ]]; then
+		GET_PLIST="Not-Available"
+	fi
+	GET_VFILE=`ps aux | grep "ffmpeg \-re " | grep -v "grep ${G_COLOR_}" | grep -v "ARGC -lt" | grep -v "\-fflags" | grep ${2} | grep ${3} | grep -v "multi_live/play" | awk {'print $14'} | rev | cut -d"/" -f1 | rev | uniq`
+	if [[ ! ${GET_VFILE} ]]; then
+		GET_VFILE="Not-Available"
+	elif [[ ${GET_VFILE} != *"."* ]]; then
+		GET_VFILE=`ps aux | grep "ffmpeg \-re " | grep -v "grep ${G_COLOR_}" | grep -v "ARGC -lt" | grep -v "\-fflags" | grep ${2} | grep ${3} | grep -v "multi_live/play" | awk {'print $16'} | rev | cut -d"/" -f1 | rev | uniq`
+	fi
+	echo ${GET_PLIST},${GET_VFILE:0:35},${GET_STATUS}
+fi
+
+###########################################################################################
+####################### kill process [ killp USER RTMP_PORT Plist ] #######################
+
+if [ ${Option} = "killp" ]; then
+	ARGC_func 4 4
+	for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "utils killp ${2}" | grep -v "multi_live/play" | grep ${2} | grep ${3} | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+	if [ ! -f ${cPanel_chk} ]; then
+		rm -rf /home/${2}/stream/*/*
+	else
+		rm -rf ${cPanel_USER}/${2}/stream/*/*
+	fi
+	echo -e "success-done"
+fi
+
+###########################################################################
+####################### SSL auto renew [ sslcheck ] #######################
+
+if [ ${Option} = "sslcheck" ]; then
+	if [ ! -f ${cPanel_chk} ]; then
+		/usr/bin/certbot renew
+		/home/vdopanel/core/utils loadbrebuild
+	else
+		/usr/local/cpanel/bin/autossl_check --user=vdopanel
+	fi
+	/home/vdopanel/core/utils sendpost
+fi
+
+#######################################################################################################
+####################### Social stream [ social-YT USER ST_KEY PCLIVE-WEBTV ] ##########################
+####################### Social stream [ social-FB USER ST_KEY PCLIVE-WEBTV RTMP_PORT ] ################
+####################### Social stream [ social-TW USER ST_KEY PCLIVE-WEBTV TW_SERVER ] ################
+####################### Social stream [ social-PS USER ST_KEY PCLIVE-WEBTV ] ##########################
+####################### Social stream [ social-DM USER ST_KEY PCLIVE-WEBTV ] ##########################
+####################### Social stream [ social-CS USER ST_KEY PCLIVE-WEBTV CS_URL ] ###################
+####################### Social stream [ social-YT USER off ] ##########################################
+####################### Social stream [ social-FB USER off ] ##########################################
+####################### Social stream [ social-TW USER off ] ##########################################
+####################### Social stream [ social-PS USER off ] ##########################################
+####################### Social stream [ social-DM USER off ] ##########################################
+####################### Social stream [ social-CS USER off ] ##########################################
+
+if [ ${Option} = "social-YT" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/youtube-pclive-stream/c\            # youtube-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/youtube-webtv-stream/c\            # youtube-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+
+	ARGC_func 4 4
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		if [ ${4} = "1" ]; then
+			sed -i "/youtube-pclive-stream/c\            push rtmp:\/\/a.rtmp.youtube.com\/live2\/${3}; # youtube-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/youtube-webtv-stream/c\            # youtube-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		elif [ ${4} = "2" ]; then
+			sed -i "/youtube-webtv-stream/c\            push rtmp:\/\/a.rtmp.youtube.com\/live2\/${3}; # youtube-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/youtube-pclive-stream/c\            # youtube-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "social-FB" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/facebook-pclive-stream/c\            # facebook-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/facebook-webtv-stream/c\            # facebook-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+
+	ARGC_func 5 5
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		STUNNEL_PORT="1${5:1}"
+		if [ ${4} = "1" ]; then
+			sed -i "/facebook-pclive-stream/c\            push rtmp:\/\/127.0.0.1:${STUNNEL_PORT}\/rtmp\/${3}; # facebook-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/facebook-webtv-stream/c\            # facebook-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		elif [ ${4} = "2" ]; then
+			sed -i "/facebook-webtv-stream/c\            push rtmp:\/\/127.0.0.1:${STUNNEL_PORT}\/rtmp\/${3}; # facebook-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/facebook-pclive-stream/c\            # facebook-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "social-TW" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/twitch-pclive-stream/c\            # twitch-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/twitch-webtv-stream/c\            # twitch-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+
+	ARGC_func 5 5
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		if [ ${4} = "1" ]; then
+			sed -i "/twitch-pclive-stream/c\            push rtmp:\/\/live-${5}.twitch.tv\/app\/${3}; # twitch-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/twitch-webtv-stream/c\            # twitch-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		elif [ ${4} = "2" ]; then
+			sed -i "/twitch-webtv-stream/c\            push rtmp:\/\/live-${5}.twitch.tv\/app\/${3}; # twitch-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/twitch-pclive-stream/c\            # twitch-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "social-PS" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/periscope-pclive-stream/c\            # periscope-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/periscope-webtv-stream/c\            # periscope-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+
+	ARGC_func 4 4
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		if [ ${4} = "1" ]; then
+			sed -i "/periscope-pclive-stream/c\            push rtmp:\/\/de.pscp.tv:80\/x\/${3}; # periscope-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/periscope-webtv-stream/c\            # periscope-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		elif [ ${4} = "2" ]; then
+			sed -i "/periscope-webtv-stream/c\            push rtmp:\/\/de.pscp.tv:80\/x\/${3}; # periscope-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/periscope-pclive-stream/c\            # periscope-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "social-DM" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/dailymotion-pclive-stream/c\            # dailymotion-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/dailymotion-webtv-stream/c\            # dailymotion-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+
+	ARGC_func 4 4
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		if [ ${4} = "1" ]; then
+			sed -i "/dailymotion-pclive-stream/c\            push rtmp:\/\/publish.dailymotion.com\/publish-dm\/${3}; # dailymotion-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/dailymotion-webtv-stream/c\            # dailymotion-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		elif [ ${4} = "2" ]; then
+			sed -i "/dailymotion-webtv-stream/c\            push rtmp:\/\/publish.dailymotion.com\/publish-dm\/${3}; # dailymotion-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/dailymotion-pclive-stream/c\            # dailymotion-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "social-CS" ]; then
+	if [ ${3} = "off" ]; then
+		if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+			sed -i "/custom-pclive-stream/c\            # custom-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/custom-webtv-stream/c\            # custom-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+			echo -e "success-done"
+		fi
+		exit -1
+	fi
+	ARGC_func 5 5
+	if [ -f ${NGX_CONF}/${2}-rtmp.conf ]; then
+		if [ ${4} = "1" ]; then
+			C_URL=${5////\\/}
+			sed -i "/custom-pclive-stream/c\            push ${C_URL}\/${3}; # custom-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/custom-webtv-stream/c\            # custom-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		else
+			C_URL=${5////\\/}
+			sed -i "/custom-webtv-stream/c\            push ${C_URL}\/${3}; # custom-webtv-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			sed -i "/custom-pclive-stream/c\            # custom-pclive-stream" "${NGX_CONF}/${2}-rtmp.conf"
+			/bin/systemctl reload nginx.service
+		fi
+	fi
+	echo -e "success-done"
+fi
+
+#################################################################################
+####################### List new features [ newfeatures ] #######################
+
+if [ ${Option} = "newfeatures" ]; then
+	CUR_VER=`cat /home/vdopanel/public_html/.env | grep APP_VERSION= | cut -d"=" -f2 | tr -d "."`
+	for i in `curl -s https://vdopanel.com/dist/releaselog/all-release.txt`
+	do
+		VER_DOT2=`echo ${i} | tr -d "."`
+		if [ "${VER_DOT2}" -gt "${CUR_VER}" ]; then
+			echo "* v${i}"
+			curl -s https://vdopanel.com/dist/releaselog/${i}.txt
+		fi
+	done
+fi
+
+####################################################################################
+####################### Restart services [ restart SERVICE ] #######################
+
+if [ ${Option} = "restart" ]; then
+	ARGC_func 2 2
+	if [ ${2} = "nginx" ]; then
+		/bin/systemctl reload nginx.service
+		validation_func "echo Error : when restart nginx service"
+		echo -e "nginx service restarted successfully"
+	elif [ ${2} = "stunnel" ]; then
+		/bin/systemctl daemon-reload
+		/bin/systemctl restart stunnel.service
+		validation_func "echo Error : when restart stunnel service"
+		echo -e "stunnel service restarted successfully"
+	elif [ ${2} = "ftp" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			/bin/systemctl restart vsftpd
+			validation_func "echo Error : when restart FTP service"
+			echo -e "FTP service restarted successfully"
+		else
+			echo -e "This is cPanel server please restart ftp from WHM"
+		fi
+	elif [ ${2} = "php-fpm" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			/bin/systemctl restart php-fpm.service
+			validation_func "echo Error : when restart php-fpm service"
+			/bin/systemctl reload nginx.service
+			validation_func "echo Error : when restart php-fpm service"
+			echo -e "php-fpm service restarted successfully"
+		else
+			echo -e "This is cPanel server please restart from WHM"
+		fi
+	fi
+fi
+
+###############################################################################################
+####################### Backup tools [ testremote R_HOST R_PORT R_USER R_PASS ] ###############
+####################### Backup tools [ listremote_b R_HOST R_PORT R_USER R_PASS R_DEST R_TYPE ]
+####################### Backup tools [ backupstatus LOCAL_OR_REMOTE  ] ########################
+####################### Backup tools [ dobackup OPTION ] ######################################
+
+if [ ${Option} = "testremote" ]; then
+	ARGC_func 5 5
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	REMOTE_PASS=${5}
+	sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "hostname" >/dev/null 2>&1
+	validation_func "echo Connection failed, remote host not connected."
+	echo "Remote host connect success."
+fi
+
+if [ ${Option} = "listremote_b" ]; then
+	ARGC_func 7 7
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	REMOTE_PASS=${5}
+	REMOTE_DEST=${6}
+	REMOTE_TYPE=${7}
+	R_CONN=`sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "ls -la ${REMOTE_DEST}/${REMOTE_TYPE}/broadcasters"`
+	validation_func "echo Error happened."
+	COUNT=0
+	IFS=$'\n'
+	for i in ${R_CONN}
+	do
+		COUNT=$((COUNT +1))
+		if [ ${COUNT} = 1 ] || [ ${COUNT} = 2 ] || [ ${COUNT} = 3 ]; then
+			continue
+		fi
+		echo ${i} | awk {'print $6,$7,$8,$9'}
+	done
+fi
+
+if [ ${Option} = "backupstatus" ]; then
+	ARGC_func 2 2
+	Backup_Enable_L=`mysql ${DB_NAME} -e "SELECT local_status FROM backups\G" | grep -v ". row" | awk '{print $2}'`
+	Backup_Enable_R=`mysql ${DB_NAME} -e "SELECT remote_status FROM backups\G" | grep -v ". row" | awk '{print $2}'`
+	Backup_Logs="/home/vdopanel/core/logs"
+	CHECK_B_S_FUNC()
+	{
+		if [ ${2} = 0 ]; then
+			echo -e "${3} backup disabled."
+		elif [ ${2} = 1 ]; then
+			if [ -f ${Backup_Logs}/${1} ]; then
+				B_STATUS=`tail -1 ${Backup_Logs}/${1} | grep backup-status | cut -d "=" -f2 | tr -d "'"`
+				if [[ ! ${B_STATUS} ]]; then
+					echo -e "Status\t : Not available now, May be still backup process working on the server, check it later."
+					exit -1
+				fi
+				END_T=`tail -2 ${Backup_Logs}/${1} | grep "End date :" | awk '{for (i=1; i<=NF-2; i++) $i = $(i+3); NF-=3; print}'`
+				T_mod=$(date -r ${Backup_Logs}/${1} +%s)
+				T_now=$(date +%s)
+				T_days=$(expr \( $T_now - $T_mod \) / 86400)
+				T_hours=$(expr \( $T_now - $T_mod \) / 3600)
+				T_minutes=$(expr \( $T_now - $T_mod \) / 60)
+				if [ ${T_days} = "0" ]; then
+					Since_T="${T_hours} Hours"
+					if [ ${T_hours} = 0 ]; then
+						Since_T="${T_minutes} Minutes"
+					fi
+				else
+					Since_T="${T_days} Days"
+				fi
+				if [ ${B_STATUS} = "success" ]; then
+					echo -e "Status\t : ${B_STATUS}\nEnded at : [ ${END_T} ]\nSince\t : [ ${Since_T} ]"
+				elif [ ${B_STATUS} = "fail" ]; then
+					echo -e "Status\t : ${B_STATUS}\nEnded at : [ ${END_T} ]\nSince\t : [ ${Since_T} ]"
+				else
+					echo -e "Status\t : Unknown, please check local backup logs for more info \n[ ${END_T} ]"
+				fi
+			else
+				echo -e "Status\t: Not available yet, check it later."
+			fi
+		fi
+	}
+	if [ ${2} = "local_b" ]; then
+		CHECK_B_S_FUNC backup-log ${Backup_Enable_L} Local
+	elif [ ${2} = "remote_b" ]; then
+		CHECK_B_S_FUNC backup-log-remote ${Backup_Enable_R} Remote
+	fi
+fi
+
+if [ ${Option} = "dobackup" ]; then
+	ARGC_func 2 2
+	Backuprun_FUNC()
+	{
+	   AD="admin"
+	   B_CHK_P=`ps -aux | grep "\/core\/backup ${1}${AD}" | grep -v "grep ${G_COLOR_}" | grep -v "G_COLOR_="`
+	   if [[ ! ${B_CHK_P} ]]; then
+		if [ ${1} = "fullbackup-all-" ]; then
+			/home/vdopanel/core/backup ${1}${AD} >/dev/null 2>&1 &
+			echo "backup process working now in background."
+		elif [ ${1} = "manually-" ]; then
+			echo "run"
+		elif [ ${1} = "restore-" ]; then
+			echo "run"
+		elif [ ${1} = "transfer-do-" ]; then
+			echo "run"
+		fi
+	   else
+		echo "there other process working right now, task aborted."
+	   fi
+	}
+
+	if [ ${2} = "scheduling" ]; then
+		Backuprun_FUNC fullbackup-all-
+	elif [ ${2} = "manually" ]; then
+		Backuprun_FUNC manually-
+	elif [ ${2} = "restore" ]; then
+		Backuprun_FUNC restore-
+	elif [ ${2} = "transfer" ]; then
+		Backuprun_FUNC transfer-do-
+	fi
+fi
+
+#################################################################################
+####################### Check RTMP auth [ rtmpauth USER ] #######################
+
+if [ ${Option} = "rtmpauth" ]; then
+	ARGC_func 2 2
+	CHK_AUTH=`cat ${NGX_CONF}/${2}-rtmp.conf* | grep rtmp-auth`
+	if [[ ${CHK_AUTH} ]]; then
+		echo "rtmp-auth"
+	else
+		echo "locked-ip"
+	fi
+fi
+
+#######################################################################################################
+####################### Service control [ serv-control restart-stop-start USER RTMP_PORT ] ############
+
+if [ ${Option} = "serv-control" ]; then
+	ARGC_func 4 4
+	KILL_P_FUNC()
+	{
+	  for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "G_COLOR_=" | grep ${1} | grep ${2} | awk '{print $2}'`
+	  do
+		kill -9 ${i}
+	  done
+	}
+	if [ ${2} = "restart" ]; then
+		KILL_P_FUNC ${3} ${4}
+		if [ ! -f ${cPanel_chk} ]; then
+			rm -rf /home/${3}/live-streaming/hls/* /home/${3}/stream/hls/*
+		else
+			rm -rf ${cPanel_USER}/${3}/live-streaming/hls/* ${cPanel_USER}/${3}/stream/hls/*
+		fi
+		/bin/systemctl reload nginx.service
+		echo -e "Broadcasting service restarted."
+	fi
+
+	if [ ${2} = "stop" ]; then
+		if [ -f ${NGX_CONF}/${3}-rtmp.conf ]; then
+			mv ${NGX_CONF}/${3}-rtmp.conf ${NGX_CONF}/${3}-rtmp.conf_stop
+		fi
+		KILL_P_FUNC ${3} ${4}
+		if [ ! -f ${cPanel_chk} ]; then
+			rm -rf /home/${3}/live-streaming/hls/* /home/${3}/stream/hls/*
+		else
+			rm -rf ${cPanel_USER}/${3}/live-streaming/hls/* ${cPanel_USER}/${3}/stream/hls/*
+		fi
+		/bin/systemctl reload nginx.service
+		echo -e "Broadcasting service stopped."
+	fi
+
+	if [ ${2} = "start" ]; then
+		if [ -f ${NGX_CONF}/${3}-rtmp.conf_stop ]; then
+			mv ${NGX_CONF}/${3}-rtmp.conf_stop ${NGX_CONF}/${3}-rtmp.conf
+		fi
+		/bin/systemctl reload nginx.service
+		echo -e "Broadcasting service started."
+	fi
+fi
+
+######################################################################
+####################### Send post [ sendpost ] #######################
+
+if [ ${Option} = "sendpost" ]; then
+	DOMAIN=`mysql ${DB_NAME} -e "SELECT domain FROM users WHERE name='admin'\G" | grep -v ". row" | awk '{print $2}'`
+	Broad_COUNT=`mysql ${DB_NAME} -e "SELECT COUNT(*) FROM broadcasters\G" | grep -v ". row" | awk '{print $2}'`
+	APP_VER=`cat /home/vdopanel/public_html/.env | grep APP_VERSION= | cut -d"=" -f2`
+	if [ ! -f ${cPanel_chk} ]; then
+		OS_T=`cat /etc/os-release | grep PRETTY_NAME= | cut -d"=" -f2 | tr -d '\"'`
+	else
+		OS_T1=`cat /etc/os-release | grep PRETTY_NAME= | cut -d"=" -f2 | tr -d '\"'`
+		OS_T="cPanel with ${OS_T1}"
+	fi
+	RAND_TIME=`echo $(( (RANDOM % 20)  + 1 ))`
+	sleep "${RAND_TIME}"
+	curl -d "action=total&ip=${SERV_IP}&domain=${DOMAIN}&total=${Broad_COUNT}&appver=${APP_VER}&ostype=${OS_T}" \
+	     -X POST https://directory.vdopanel.com/add.php >/dev/null 2>&1
+fi
+
+#######################################################################
+####################### check cPanel [ cpanel ] #######################
+
+if [ ${Option} = "cpanel" ]; then
+	if [ ! -f ${cPanel_chk} ]; then
+		echo "nocpanel"
+	else
+		echo "cpanel"
+	fi
+fi
+
+###################################################################################################
+####################### recorder option [ recorder enable or disable USER ] #######################
+####################### recorder option [ recorder status USER ] ##################################
+####################### record webtv option [ recordrestream enable or disable USER RECORD_TYPE ] #
+
+if [ ${Option} = "recorder" ]; then
+	ARGC_func 3 3
+	RTMP_FILE=`ls ${NGX_CONF}/${3}-rtmp.conf*`
+	if [ ${2} = "status" ]; then
+		ST_CHK=`egrep "#record off" ${RTMP_FILE}`
+		if [[ ${ST_CHK} ]]; then
+			echo "yes"
+		else
+			echo "no"
+		fi
+		exit -1
+	fi
+	if [ ${2} = "enable" ]; then
+		sed -i "/record off; #RecordLive/c\              #record off; #RecordLive" "${RTMP_FILE}"
+	elif [ ${2} = "disable" ]; then
+		sed -i "/record off; #RecordLive/c\              record off; #RecordLive" "${RTMP_FILE}"
+	fi
+	/bin/systemctl reload nginx.service
+	validation_func "echo 'nginx configuration error.'"
+	echo "success-done"
+fi
+
+if [ ${Option} = "recordrestream" ]; then
+	ARGC_func 4 4
+	RTMP_FILE=`ls ${NGX_CONF}/${3}-rtmp.conf*`
+	sed -i "s/#record off; #RecordRestream_/record off; #RecordRestream_/g" "${RTMP_FILE}"
+	if [[ ${4} == "multi" ]]; then
+		RECORD_TYPE="#RecordRestream_WebtvMulti"
+	else
+		RECORD_TYPE="#RecordRestream_WebtvSingle"
+	fi
+	if [[ ${2} == "enable" ]]; then
+		sed -i "/record off; ${RECORD_TYPE}/c\              #record off; ${RECORD_TYPE}" "${RTMP_FILE}"
+	fi
+	/bin/systemctl reload nginx.service
+fi
+
+###########################################################################################
+####################### delete nginx live cach [ dellivecach USER ] #######################
+
+if [ ${Option} = "dellivecach" ]; then
+	if [ ! -f ${cPanel_chk} ]; then
+		rm -rf /home/${2}/live-streaming/*/*
+	else
+		rm -rf ${cPanel_USER}/${2}/live-streaming/*/*
+	fi
+fi
+
+######################################################################################################
+####################### vdopanel statistics [ statistics USER now/month ] ############################
+
+if [ ${Option} = "statistics" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		USER_PATH="/home/${2}"
+	else
+		USER_PATH="${cPanel_USER}/${2}"
+	fi
+
+	if [ ${3} = "now-cron" ]; then
+		/usr/local/bin/goaccess -f ${USER_PATH}/logs/access.log -a -o ${USER_PATH}/logs/statistics.html
+	elif [ ${3} = "now" ]; then
+		if [ ! -f ${USER_PATH}/logs/statistics.html ]; then
+			/usr/local/bin/goaccess -f ${USER_PATH}/logs/access.log -a -o ${USER_PATH}/logs/statistics.html
+		fi
+	else
+		if [ ! -f ${USER_PATH}/logs/statistics/${3}.html ]; then
+			/usr/local/bin/goaccess -f ${USER_PATH}/logs/statistics/${3} -a -o ${USER_PATH}/logs/statistics/${3}.html
+		fi
+	fi
+fi
+
+##################################################################################################
+####################### videos statistics [ videost USER RTMP VIDEO ] ############################
+####################### videos statistics [ showvideosST USER MONTH ] ############################
+
+if [ ${Option} = "videost" ]; then
+	ARGC_func 4 4
+	H_PORT=`egrep listen ${NGX_CONF}/${2}-http.http | awk '{print $2}'`
+	GET_VIP=`netstat -an | grep "${3}\|${H_PORT}" | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | uniq`
+	if [[ ${GET_VIP} ]]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			USER_PATH="/home/${2}"
+		else
+			USER_PATH="${cPanel_USER}/${2}"
+		fi
+		COUNT=0
+		GEO_SOURCE="/etc/nginx/geoip/GeoLite2-City.mmdb"
+		DATE_M=`date '+%B-%Y'`
+		ST_FILE="${USER_PATH}/logs/videostatistics/${DATE_M}"
+		declare -a arr=()
+		IFS=$'\n'
+		for i in ${GET_VIP}
+		do
+			COUNT=$((COUNT +1))
+			INFO1=`mmdblookup --file ${GEO_SOURCE} --ip ${i} country names en | cut -d '"' -f2 | tr -d '\n'`
+			INFO2=`mmdblookup --file ${GEO_SOURCE} --ip ${i} country iso_code | cut -d '"' -f2 | tr -d '\n'`
+			arr+=("${INFO1}_${INFO2}")
+		done
+		SORT_U1=`printf "%s\n" "${arr[@]}" | sort -u | tr '\n' ','`
+		SORT_U2=`printf "%s\n" "${arr[@]}" | sort -u`
+		CHK_VIDEO_F=`egrep ${4} ${ST_FILE}`
+		if [[ ! ${CHK_VIDEO_F} ]]; then
+			echo -e "${4}:${COUNT}:Countries:${SORT_U1}"
+			echo -e "${4}:${COUNT}:Countries:${SORT_U1}" >> ${ST_FILE}
+		else
+			old_count=`egrep ${4} ${ST_FILE} | cut -d ":" -f2`
+			new_count=$( echo "${old_count} + ${COUNT}" | bc )
+			sed -i "s/${4}:${old_count}/${4}:${new_count}/g" "${ST_FILE}"
+			for i2 in ${SORT_U2}
+			do
+				if [[ ${CHK_VIDEO_F} != *"${i2}"* ]]; then
+					sed -i "/${4}:${new_count}/s/$/${i2},/" "${ST_FILE}"
+				fi
+			done
+			echo -e "Video ${4} exists and updated."
+		fi
+	fi
+fi
+
+if [ ${Option} = "showvideosST" ]; then
+	ARGC_func 3 3
+	if [ ! -f ${cPanel_chk} ]; then
+		USER_PATH="/home/${2}"
+	else
+		USER_PATH="${cPanel_USER}/${2}"
+	fi
+	Show_RES=`cat ${USER_PATH}/logs/videostatistics/${3}`
+        IFS=$'\n'
+	for i in ${Show_RES}
+	do
+		VID_NAME=`echo $i | cut -d ":" -f1`
+		COUNT=`echo $i | cut -d ":" -f2`
+		Countries=`echo $i | cut -d ":" -f4`
+		echo ${VID_NAME},${COUNT},${Countries}
+	done
+fi
+
+
+############################################################################################
+####################### world map Geo IP [ geoip all-admin ] ###############################
+####################### world map Geo IP [ geoip HTTP_PORT RTMP_PORT ] #####################
+####################### Geo IP get location [ iplocation IP ] ##############################
+
+if [ ${Option} = "geoip" ]; then
+	GEO_SOURCE="/etc/nginx/geoip/GeoLite2-City.mmdb"
+	INFO_FUNC()
+	  {
+		INFO1=`mmdblookup --file ${GEO_SOURCE} --ip ${i2} country iso_code | cut -d '"' -f2 | tr -d '\n'`
+		INFO2=`mmdblookup --file ${GEO_SOURCE} --ip ${i2} country names en | cut -d '"' -f2 | tr -d '\n'`
+		INFO3=`mmdblookup --file ${GEO_SOURCE} --ip ${i2} location latitude | awk {'print $1'} | tr -d '\n'`
+		INFO4=`mmdblookup --file ${GEO_SOURCE} --ip ${i2} location longitude | awk {'print $1'} | tr -d '\n'`
+		echo "${INFO1},${INFO2},${INFO3},${INFO4}"
+	  }
+	if [ ${2} = "all-admin" ]; then
+		ARGC_func 2 2
+		CONF_F1=`ls ${NGX_CONF}/*-http.http`
+		for i in ${CONF_F1}
+		do
+			H_PORT=`cat ${i} | grep listen | awk '{print $2}'`
+			GET_VIP=`netstat -an | grep "${H_PORT}" | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | uniq`
+			for i2 in ${GET_VIP}
+			do
+				INFO_FUNC
+			done
+		done
+
+		CONF_F2=`ls ${NGX_CONF}/*-rtmp.conf`
+		for i in ${CONF_F2}
+		do
+			R_PORT=`cat ${i} | grep listen | awk '{print $2}' | tr -d ";"`
+			GET_VIP=`netstat -an | grep "${R_PORT}" | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | uniq`
+			for i2 in ${GET_VIP}
+			do
+				INFO_FUNC
+			done
+		done
+		exit -1
+	fi
+
+	ARGC_func 3 3
+	GET_VIP=`netstat -an | grep "${2}\|${3}" | grep ESTABLISHED | awk '{print $5}' | grep -v "127.0.0.1" | cut -d":" -f1 | uniq`
+	for i2 in ${GET_VIP}
+	do
+		INFO_FUNC
+	done
+fi
+
+if [ ${Option} = "iplocation" ]; then
+	ARGC_func 2 2
+	GEO_SOURCE="/etc/nginx/geoip/GeoLite2-City.mmdb"
+	COUNTRY=`mmdblookup --file ${GEO_SOURCE} --ip ${2} country names en | cut -d '"' -f2 | tr -d '\n'`
+	CONTINENT=`mmdblookup --file ${GEO_SOURCE} --ip ${2} continent names en | cut -d '"' -f2 | tr -d '\n'`
+	COUNTRY_ISO=`mmdblookup --file ${GEO_SOURCE} --ip ${2} country iso_code | cut -d '"' -f2 | tr -d '\n' | tr '[:upper:]' '[:lower:]'`
+	echo ${COUNTRY} - ${CONTINENT}
+	echo ${COUNTRY_ISO}
+fi
+
+#######################################################################################################
+####################### domainlock option [ domainlock enable/disable USER DOMAIN ] ###################
+####################### domainlock option [ domainlock status USER ] ##################################
+
+if [ ${Option} = "domainlock" ]; then
+        HTTP_FILE=`ls ${NGX_CONF}/${3}-http.http*`
+        if [ ${2} = "status" ]; then
+		ARGC_func 3 3
+                ST_CHK=`cat ${HTTP_FILE} | grep "#return 500; #Domain_Lock"`
+                if [[ ${ST_CHK} ]]; then
+                        echo "no"
+                else
+                        echo "yes"
+                fi
+		GET_VALUE=`egrep http_referer ${HTTP_FILE} | awk {'print $4'} | tr -d '")' | cut -d "|" -f1`
+		if [[ ${GET_VALUE} == "_REF_DO_" ]]; then
+			echo 
+		else
+			GET_DO=`egrep http_referer ${HTTP_FILE} | awk {'print $4'} | tr -d '")' | rev | cut -c24- | rev`
+			echo ${GET_DO}
+		fi
+                exit -1
+        fi
+	ARGC_func 4 4
+        if [ ${2} = "enable" ]; then
+		REP1=`egrep http_referer ${HTTP_FILE} | awk {'print $4'} | tr -d '")'`
+		sed -i "s/${REP1}/${4}|directory.vdopanel.com/g" "${HTTP_FILE}"
+		sed -i "/#Domain_Lock/c\           return 500; #Domain_Lock" "${HTTP_FILE}"
+        elif [ ${2} = "disable" ]; then
+		sed -i "/#Domain_Lock/c\           #return 500; #Domain_Lock" "${HTTP_FILE}"
+        fi
+        /bin/systemctl reload nginx.service
+        validation_func "echo 'nginx configuration error.'"
+        echo "success-done"
+fi
+
+#######################################################################################
+####################### storage usage option [ storagedu PATH ] #######################
+
+if [ ${Option} = "storagedu" ]; then
+	ARGC_func 2 2
+	du -sh ${2} | awk {'print $1'}
+fi
+
+################################################################################
+####################### cronjob tasks option [ vdocron ] #######################
+
+if [ ${Option} = "vdocron" ]; then
+	/home/vdopanel/core/utils bandwcheck all
+	/home/vdopanel/core/utils bandw action
+
+	CHK_P=`ps aux | grep "artisan queue:work" | grep -v "grep" | grep -v "utils"`
+	if [ ! -f ${cPanel_chk} ]; then
+		/home/vdopanel/core/utils chown all
+		if [[ ! ${CHK_P} ]]; then
+			/usr/bin/php /home/vdopanel/public_html/artisan queue:work </dev/null >/dev/null 2>&1 &
+		fi
+		rm -rf ${NGX_CONF}/php-fpm.conf
+		chown -R vdopanel.vdopanel /var/lib/php/session
+	else
+		if [[ ! ${CHK_P} ]]; then
+			PHP_CHK=`/usr/local/cpanel/bin/whmapi1 php_get_installed_versions | grep ea-php`
+			if [[ ${PHP_CHK} == *"ea-php74"* ]]; then
+				PHP_VER="/usr/local/bin/ea-php74"
+			elif [[ ${PHP_CHK} == *"ea-php73"* ]]; then
+				PHP_VER="/usr/local/bin/ea-php73"
+			elif [[ ${PHP_CHK} == *"ea-php72"* ]]; then
+				PHP_VER="/usr/local/bin/ea-php72"
+			fi
+			${PHP_VER} /home/vdopanel/public_html/artisan queue:work </dev/null >/dev/null 2>&1 &
+		fi
+	fi
+	echo ${CHK_P}
+	Date_=`date '+%I%M'`
+	if [[ ${Date_} == "1000" ]]; then
+		CONF_F=`ls ${NGX_CONF}/*-http.*`
+		if [[ ${CONF_F} ]]; then
+			for i in ${CONF_F}
+			do
+				GET_USER=`cat ${i} | grep alias | grep live-streaming | rev | cut -d"/" -f3 | rev | head -1`
+				/home/vdopanel/core/utils statistics ${GET_USER} now-cron
+			done
+		fi
+	fi
+fi
+
+##########################################################################################
+####################### list manual backup option [ lst-manual-b ] #######################
+
+if [ ${Option} = "lst-manual-b" ]; then
+	ls /home/vdo-*.tar.gz >/dev/null 2>&1
+	validation_func
+	for i in `ls /home/vdo-*.tar.gz`
+	do
+		FILE_NAME=`echo ${i} | cut -d "/" -f3`
+		USER=`echo ${FILE_NAME} | cut -d "." -f1 | cut -d "-" -f2`
+		FILE_USE=`du -sh ${i} | awk {'print $1'}`
+		DATE_=`date -r ${i} '+%a %d-%b-%Y %I:%M:%S %p %Z'`
+		echo ${USER},${FILE_NAME},${FILE_USE},${DATE_},
+	done
+fi
+
+#########################################################################################
+####################### kill webtv option [ killwebtv USER RTMP ] #######################
+
+if [ ${Option} = "killwebtv" ]; then
+	ARGC_func 3 3
+	for i in `ps -aux | grep ffmpeg | grep -v "grep ${G_COLOR_}" | grep -v "utils killwebtv ${2}" | grep -v "multi_live/play" | grep ${2} | grep ${3} | awk '{print $2}'`
+	do
+		kill -9 ${i}
+	done
+fi
+
+#########################################################################################################
+####################### IP lock option [ iplock STATUS USER HTTP_PORT RTMP_PORT ] #######################
+
+if [ ${Option} = "iplock" ]; then
+	ARGC_func 5 5
+	IP_L_FILE="/home/${3}/data/iplock"
+	if [[ -f ${IP_L_FILE} ]]; then
+		sed -i '/^\s*$/d' ${IP_L_FILE}
+		tr -d '\r' < ${IP_L_FILE} > /home/${3}/data/iplock_tmp
+		cat /home/${3}/data/iplock_tmp > ${IP_L_FILE}
+		rm -rf /home/${3}/data/iplock_tmp
+
+		for chk_error in `cat ${IP_L_FILE}`
+		do
+			IP_CHECK=`ipcalc -cs ${chk_error} && echo vail_ip || echo invalid_ip`
+			if [[ ${IP_CHECK} == "invalid_ip" ]]; then
+				echo "${chk_error} invalid ip, please fix it."
+				exit -1
+			fi
+		done
+
+		IPTA_LIST=`/usr/sbin/iptables -L -n -v --line-numbers | grep "${4},${5}" | grep -v "reject-with" | tac | awk {'print $1'}`
+		for i in ${IPTA_LIST}
+		do
+			/usr/sbin/iptables -D INPUT ${i}
+		done
+
+		if [[ ${2} == "on" ]]; then
+			/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${4},${5} -s ${SERV_IP} -j ACCEPT
+                        /usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${4},${5} -s 127.0.0.1 -j ACCEPT
+			for i in `cat ${IP_L_FILE}`
+			do
+				/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${4},${5} -s ${i} -j ACCEPT
+			done
+			/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${4},${5} -j DROP
+		fi
+
+		echo "success-done"
+	else
+		echo "iplock source not exists."
+	fi
+fi
+
+#####################################################################################################################
+####################### loadbalancer option [ loadbgetlog R_HOST R_PORT R_USER SERV_ID ] ############################
+####################### loadbalancer option [ loadbaddserv R_HOST R_PORT R_USER R_PASS/TEST ] #######################
+####################### loadbalancer option [ loadbrebuild ] ########################################################
+####################### loadbalancer option [ loadb disable USER ] ##################################################
+
+if [ ${Option} = "loadbgetlog" ]; then
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	SERV_ID=${5}
+	KEY_PATH="/root/.ssh"
+	ssh -i ${KEY_PATH}/LB_key -p ${REMOTE_PORT} -o ConnectTimeout=4 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "cat /tmp/lb_log" > /home/vdopanel/core/logs/loadbalancer-${SERV_ID}.log
+fi
+
+if [ ${Option} = "loadbaddserv" ]; then
+	ARGC_func 5 5
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	REMOTE_PASS=${5}
+	KEY_PATH="/root/.ssh"
+
+	if [[ ${5} == "test-with-key" ]]; then
+		ssh -i ${KEY_PATH}/LB_key -p ${REMOTE_PORT} -o ConnectTimeout=4 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "hostname" >/dev/null 2>&1
+		validation_func "echo Error_: Connection failed, remote host not connected."
+		echo -e "success-done"
+		exit -1
+        fi
+
+	APP_URL="https://vdopanel.com/dist/lb-setup.sh"
+	IP_CHECK=`ipcalc -cs ${REMOTE_HOST} && echo vail_ip || echo invalid_ip`
+	if [[ ${IP_CHECK} == "invalid_ip" ]]; then
+		echo "Error_: Server IP invalid."
+		exit -1
+	fi
+	ssh-keygen -R ${REMOTE_HOST} >/dev/null 2>&1
+	sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "hostname" >/dev/null 2>&1
+	validation_func "echo Error_: Connection failed, remote host not connected."
+	if [[ ! -f ${KEY_PATH}/LB_key ]]; then
+		ssh-keygen -t rsa -N "" -f ${KEY_PATH}/LB_key >/dev/null 2>&1
+	fi
+	sshpass -p "${REMOTE_PASS}" ssh-copy-id -i ${KEY_PATH}/LB_key.pub -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} -p ${REMOTE_PORT} >/dev/null 2>&1
+	ssh -i ${KEY_PATH}/LB_key -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "curl -s ${APP_URL} | bash -s ${REMOTE_HOST} ${SERV_IP}" < /dev/null > /dev/null 2>&1
+	echo -e "success-done"
+fi
+
+if [ ${Option} = "loadbrebuild" ]; then
+	TMP_DIR="/home/vdopanel/core/tmp"
+	NGINX_LOADB_CONFIG="/etc/nginx/loadb"
+	validation_(){
+	  if [ $? -ne 0 ]; then
+		echo -e "`date` : ${1}" >> /home/vdopanel/core/logs/loadb_error.log
+		${2}
+	  fi
+	}
+	CHK_LOADB_users=`mysql ${DB_NAME} -e "SELECT name FROM broadcasters WHERE loadb='1'\G" | awk '{print $2}' | tail -1`
+	CHK_LOADB_servers=`mysql ${DB_NAME} -e "SELECT * FROM loadbalancers WHERE setup_status='1'"`
+	if [[ ${CHK_LOADB_users} && ${CHK_LOADB_servers} ]]; then
+		CHK_LOADB_TYPE=`mysql ${DB_NAME} -e "SELECT loadb_type FROM users WHERE id='1'\G" | awk '{print $2}' | tail -1`
+
+		LOADB_SERVERS_FUNC(){
+		   LB_SERVER_IP=`mysql ${DB_NAME} -e "SELECT serv_ip FROM loadbalancers WHERE id='${i}'\G" | awk '{print $2}' | tail -1`
+		   LB_NAME=`mysql ${DB_NAME} -e "SELECT serv_name FROM loadbalancers WHERE id='${i}'\G" | awk '{print $2}' | tail -1`
+		   LB_USER=`mysql ${DB_NAME} -e "SELECT serv_user FROM loadbalancers WHERE id='${i}'\G" | awk '{print $2}' | tail -1`
+		   LB_PORT=`mysql ${DB_NAME} -e "SELECT serv_port FROM loadbalancers WHERE id='${i}'\G" | awk '{print $2}' | tail -1`
+		   LB_WEIGHT=`mysql ${DB_NAME} -e "SELECT weight FROM loadbalancers WHERE id='${i}'\G" | awk '{print $2}' | tail -1`
+		}
+
+		for L_USER in `mysql -N ${DB_NAME} -e "SELECT name FROM broadcasters WHERE loadb='1'"`
+		do
+			HTTP_PORT=`mysql ${DB_NAME} -e "SELECT http_port FROM broadcasters WHERE name='${L_USER}'\G" | awk '{print $2}' | tail -1`
+			RTMP_PORT=`mysql ${DB_NAME} -e "SELECT rtmp_port FROM broadcasters WHERE name='${L_USER}'\G" | awk '{print $2}' | tail -1`
+			BITRATE=`mysql ${DB_NAME} -e "SELECT bitrate FROM broadcasters WHERE name='${L_USER}'\G" | awk '{print $2}' | tail -1`
+			DOMAIN_CHK=`grep server_name ${NGX_CONF}/${L_USER}-http* | awk {'print $2'} | tr -d ";"`
+			if [[ ${DOMAIN_CHK} ]]; then
+				DOMAIN=${DOMAIN_CHK}
+				HTTP_S_="https://"
+				if [ -f ${cPanel_chk} ]; then
+					loadb_http_file="loadb_http_ssl_cpanel.conf"
+				else
+					loadb_http_file="loadb_http_ssl.conf"
+				fi
+			else
+				DOMAIN=${SERV_IP}
+				HTTP_S_="http://"
+				loadb_http_file="loadb_http.conf"
+			fi
+
+			if [[ ${CHK_LOADB_TYPE} == 1 ]]; then
+				echo -e "upstream ${L_USER} {\n   ip_hash;" > ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+			elif [[ ${CHK_LOADB_TYPE} == 2 ]]; then
+				echo -e "map \$geoip2_data_continent_code \$nearest_server_${L_USER} {\n   default all_${L_USER};" > ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+			fi
+			loadbalancers_table=`mysql -N ${DB_NAME} -e "SELECT id FROM loadbalancers WHERE setup_status='1'"`
+			for i in ${loadbalancers_table}
+			do
+				LOADB_SERVERS_FUNC
+				if [[ ${CHK_LOADB_TYPE} == 1 ]]; then
+					echo -e "      server ${LB_SERVER_IP}:${HTTP_PORT} weight=${LB_WEIGHT} max_fails=1 fail_timeout=10s ;" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+				fi
+				if [[ -d /etc/letsencrypt/archive ]]; then
+					rsync -avzR --recursive -e "ssh -p ${LB_PORT} -i /root/.ssh/LB_key -o ConnectTimeout=5 -o StrictHostKeyChecking=no" \
+					/etc/letsencrypt/archive /etc/letsencrypt/live ${LB_USER}@${LB_SERVER_IP}:/ >/dev/null 2>&1
+					validation_ "error when sync letsencrypt ssl files for ${LB_SERVER_IP}" continue
+				fi
+				if [ -f ${cPanel_chk} ]; then
+					rsync -avzR --recursive -e "ssh -p ${LB_PORT} -i /root/.ssh/LB_key -o ConnectTimeout=5 -o StrictHostKeyChecking=no" \
+					/var/cpanel/ssl/apache_tls ${LB_USER}@${LB_SERVER_IP}:/ >/dev/null 2>&1
+					validation_ "error when sync cPanel ssl files for ${LB_SERVER_IP}" continue
+				fi
+				ssh -i /root/.ssh/LB_key -p ${LB_PORT} -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${LB_USER}@${LB_SERVER_IP} \
+				"mkdir -p /home/${L_USER}/live-streaming/hls /home/${L_USER}/stream/hls /home/${L_USER}/stream-hybrid/hls; chmod -R 777 /home/${L_USER}" >/dev/null 2>&1
+				validation_ "error when sync create users directory at home for ${LB_SERVER_IP}" continue
+
+				cat ${SOU_CONF}/${loadb_http_file} > ${TMP_DIR}/${L_USER}-http.http
+				validation_ "error when create ${L_USER}-http.http for ${LB_SERVER_IP}" continue
+				sed -i "s/_PORT_/${HTTP_PORT}/g" ${TMP_DIR}/${L_USER}-http.http
+				sed -i "s/_USER_/${L_USER}/g" ${TMP_DIR}/${L_USER}-http.http
+				sed -i "s/_DOMAIN_/${DOMAIN}/g" ${TMP_DIR}/${L_USER}-http.http
+				sed -i "s/_MAIN_SERV_IP_/${SERV_IP}/g" ${TMP_DIR}/${L_USER}-http.http
+
+				cat ${SOU_CONF}/loadb_rtmp.conf > ${TMP_DIR}/${L_USER}-rtmp.conf
+				validation_ "error when create ${L_USER}-rtmp.conf for ${LB_SERVER_IP}" continue
+				sed -i "s/_PUBLIC_SERV_IP_/${LB_SERVER_IP}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+				sed -i "s/_PORT_/${RTMP_PORT}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+				sed -i "s/_USER_/${L_USER}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+				sed -i "s/_MAIN_SERV_IP_/${SERV_IP}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+#				sed -i "s/_BitRate_/${BITRATE}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+#				Resolution=`grep hls_variant ${NGX_CONF}/${L_USER}-rtmp* | head -1 | awk {'print $2'}`
+#				sed -i "s/_Resolution_/${Resolution}/g" ${TMP_DIR}/${L_USER}-rtmp.conf
+
+				rsync -avz --recursive -e "ssh -p ${LB_PORT} -i /root/.ssh/LB_key -o ConnectTimeout=5 -o StrictHostKeyChecking=no" \
+				${TMP_DIR}/${L_USER}-http.http ${TMP_DIR}/${L_USER}-rtmp.conf ${LB_USER}@${LB_SERVER_IP}:${NGX_CONF} >/dev/null 2>&1
+				validation_ "error when sync nginx vhost config files for ${LB_SERVER_IP}" continue
+				ssh -i /root/.ssh/LB_key -p ${LB_PORT} -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${LB_USER}@${LB_SERVER_IP} \
+				"/bin/systemctl reload nginx.service" >/dev/null 2>&1
+				validation_ "error when reload nginx service for ${LB_SERVER_IP}" continue				
+			done
+
+			if [[ ${CHK_LOADB_TYPE} == 1 ]]; then
+				PROXY_PASS_URL=${L_USER}
+				echo -e "}" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+			elif [[ ${CHK_LOADB_TYPE} == 2 ]]; then
+				PROXY_PASS_URL="\$nearest_server_${L_USER}"
+				GEO_SOURCE="/etc/nginx/geoip/GeoLite2-Country.mmdb"
+				declare -a arr=()
+				for i in ${loadbalancers_table}
+				do
+					LOADB_SERVERS_FUNC
+					continent_code=`mmdblookup --file ${GEO_SOURCE} --ip ${LB_SERVER_IP} continent code | cut -d '"' -f2 | tr -d '\n'`
+					arr+=("${continent_code}")
+				done
+				SORT=`printf "%s\n" "${arr[@]}" | sort -u`
+				LAST=`printf "%s\n" "${arr[@]}" | sort -u | tr '\n' ' ' | awk '{print $NF}'`
+				for i2 in ${SORT}
+				do
+					lower_continent=`echo ${i2} | tr '[:upper:]' '[:lower:]'`
+					echo -e "   ${i2} ${lower_continent}_${L_USER};" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+					if [[ ${LAST} == ${i2} ]]; then
+						echo -e "}\n" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+					fi
+				done
+
+				DEFAULT_SERV=`mysql ${DB_NAME} -e "SELECT serv_ip FROM loadbalancers WHERE default_all='1'\G" | awk '{print $2}' | tail -1`
+				DEFAULT_SERV_WEIGHT=`mysql ${DB_NAME} -e "SELECT weight FROM loadbalancers WHERE default_all='1'\G" | awk '{print $2}' | tail -1`
+				echo -e "upstream all_${L_USER} {\n   ip_hash;\n   server ${DEFAULT_SERV}:${HTTP_PORT} weight=${DEFAULT_SERV_WEIGHT} max_fails=1 fail_timeout=10s ;\n}\n" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+
+				for i3 in ${SORT}
+				do
+					lower_continent=`echo ${i3} | tr '[:upper:]' '[:lower:]'`
+					echo -e "upstream ${lower_continent}_${L_USER} {\n   ip_hash;" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+					for i in ${loadbalancers_table}
+					do
+						LOADB_SERVERS_FUNC
+						continent_code=`mmdblookup --file ${GEO_SOURCE} --ip ${LB_SERVER_IP} continent code | cut -d '"' -f2 | tr -d '\n'`
+						if [[ ${i3} == ${continent_code} ]]; then
+							echo -e "   server ${LB_SERVER_IP}:${HTTP_PORT} weight=${LB_WEIGHT} max_fails=1 fail_timeout=10s ;" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+						fi
+					done
+					echo -e "}\n" >> ${NGINX_LOADB_CONFIG}/${L_USER}.balance
+				done
+			fi
+
+			sed -i "/LOADB_SET/c\           proxy_pass ${HTTP_S_}${PROXY_PASS_URL}; #LOADB_SET" ${NGX_CONF}/${L_USER}-http*
+
+			sed -i "/_LoadB_PUSH_SET_/d" ${NGX_CONF}/${L_USER}-rtmp*
+			LINE_NO1=`sed -n "\|_LoadB_PUSH_pclive_|=" ${NGX_CONF}/${L_USER}-rtmp*`
+			for i in ${loadbalancers_table}
+			do
+				LOADB_SERVERS_FUNC
+				LINE_NO1=$((LINE_NO1 +1))
+				sed -i "${LINE_NO1}s/.*/            push rtmp:\/\/${LB_SERVER_IP}:${RTMP_PORT}\/${L_USER}live\/${L_USER}live; # _LoadB_PUSH_SET_pclive_\n/" ${NGX_CONF}/${L_USER}-rtmp*
+			done
+			LINE_NO2=`sed -n "\|_LoadB_PUSH_webtv_|=" ${NGX_CONF}/${L_USER}-rtmp*`
+			for i in ${loadbalancers_table}
+			do
+				LOADB_SERVERS_FUNC
+				LINE_NO2=$((LINE_NO2 +1))
+				sed -i "${LINE_NO2}s/.*/            push rtmp:\/\/${LB_SERVER_IP}:${RTMP_PORT}\/${L_USER}stream\/play; # _LoadB_PUSH_SET_webtv_\n/" ${NGX_CONF}/${L_USER}-rtmp*
+			done
+		done
+		rm -rf ${TMP_DIR}/*-http.http ${TMP_DIR}/*-rtmp.conf
+		/bin/systemctl reload nginx.service >/dev/null 2>&1
+		validation_func "echo Error_: nginx error."
+		echo -e "success-done"
+	else
+		echo -e "success-done"
+	fi
+fi
+
+if [ ${Option} = "loadb" ]; then
+	ARGC_func 3 3
+	if [[ ${2} == "disable" ]]; then
+		/home/vdopanel/core/utils rebuildrtmp ${3} >/dev/null 2>&1
+		DOMAIN_CHK=`egrep server_name ${NGX_CONF}/${3}-http* | awk {'print $2'} | tr -d ";"`
+		HTTP_PORT=`egrep listen ${NGX_CONF}/${3}-http* | awk {'print $2'}`
+		if [[ ${DOMAIN_CHK} ]]; then
+			PARS_="rebuilddomain"
+			DOMAIN=${DOMAIN_CHK}
+		else
+			PARS_="rebuilddomain2"
+			DOMAIN=${SERV_IP}
+		fi
+		/home/vdopanel/core/utils ${PARS_} ${3} ${DOMAIN} ${HTTP_PORT} >/dev/null 2>&1
+		rm -rf /etc/nginx/loadb/${3}.balance
+		/bin/systemctl reload nginx.service >/dev/null 2>&1
+		validation_func "echo Error_: nginx error."
+		echo -e "success-done"
+	fi
+fi
+
+######################################################################################################
+####################### youtube downloader option [ youtubedownload USER chk ] #######################
+####################### youtube downloader option [ youtubedownload USER chkp ] ######################
+####################### youtube downloader option [ youtubedownload P_ID killp ] #####################
+####################### youtube downloader option [ youtubedownload USER URL ] #######################
+
+if [ ${Option} = "youtubedownload" ]; then
+        ARGC_func 3 3
+	if [[ ${3} == "chk" ]]; then
+		CHK_P=`ps aux | grep "yt-dlp" | grep "/${2}/uploads" | grep -v "grep ${G_COLOR_}" | grep -v "core/utils"`
+		if [[ ${CHK_P} ]]; then
+			echo "There is already an old process running now."
+		else
+			echo "pass"
+		fi
+		exit -1
+	fi
+
+	if [[ ${3} == "chkp" ]]; then
+		CHK_P=`ps aux | grep "yt-dlp" | grep "/${2}/" | grep youtube.com | grep -v "grep ${G_COLOR_}" | grep -v "core/utils"`
+		if [[ ${CHK_P} ]]; then
+			PROCESS_ID=`echo ${CHK_P} | awk {'print $2'}`
+			Y_URL=`echo ${CHK_P} | awk {'print $17'}`
+			echo -e "${PROCESS_ID}\n${Y_URL}"
+		else
+			echo "no_process"
+		fi
+		exit -1
+	fi
+
+	if [[ ${3} == "killp" ]]; then
+		kill -9 ${2}
+		echo "success-done"
+		exit -1
+	fi
+
+	if [ -f ${cPanel_chk} ]; then
+		USER_PATH=${cPanel_USER}
+	else
+		USER_PATH="/home"
+	fi
+	Y_LOG_F="/home/vdopanel/core/logs/youtube-${2}.log"
+	echo > ${Y_LOG_F}
+	mkdir -p ${USER_PATH}/${2}/uploads/YouTube_Downloads
+	chmod 777 ${USER_PATH}/${2}/uploads/YouTube_Downloads
+	/usr/local/bin/yt-dlp -f "best[height<=720]" -o "${USER_PATH}/${2}/uploads/YouTube_Downloads/%(title)s.%(ext)s" "${3}" > ${Y_LOG_F}
+	if [ $? -ne 0 ]; then
+		echo -e "\nError happened, invalid youtube URL or process has been killed." >> ${Y_LOG_F}
+		exit -1
+	fi
+	echo -e "\nProcess has been finished." >> ${Y_LOG_F}
+fi

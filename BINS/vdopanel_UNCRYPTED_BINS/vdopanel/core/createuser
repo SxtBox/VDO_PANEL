@@ -1,0 +1,242 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -ne 10 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+export User=$1
+export Password=$2
+export Port_rtmp=$3
+export Port_http=$4
+export Bitrate=${5}
+export Storage=$6
+export Bandwidth=$7
+export ViewerL=$8
+export Domain=$9
+export B_Type=${10}
+
+validation_func()
+{
+ if [ $? -ne 0 ]; then
+	${1}
+	${2}
+	${3}
+ 	exit -1
+ fi
+}
+
+Port_stunn="1${Port_rtmp:1}"
+SERV_IP=`dig TXT +short o-o.myaddr.l.google.com @ns1.google.com -4 | tr -d '"'`
+
+CHK_PORT1=`netstat -an | grep ":${Port_rtmp} "`
+if [[ ${CHK_PORT1} ]]; then
+	echo -e "Error : rtmp port in use."
+	exit -1
+fi
+
+CHK_PORT2=`netstat -an | grep ":${Port_http} "`
+if [[ ${CHK_PORT2} ]]; then
+	echo -e "Error : http port in use."
+	exit -1
+fi
+
+CHK_PORT3=`netstat -an | grep ":${Port_stunn} "`
+if [[ ${CHK_PORT3} ]]; then
+	echo -e "Error : stunnel port in use."
+	exit -1
+fi
+
+cPanel_chk="/usr/local/cpanel/version"
+if [ ! -f ${cPanel_chk} ]; then
+   if [ -d /home/${User} ];then
+	echo -e "Error : directory already exists."
+	exit -1
+   fi
+
+   /usr/sbin/useradd ${User} -g vdopanel 1>/dev/null
+   validation_func "/usr/sbin/userdel -r $User" "echo 'Error : set user'"
+
+   echo ${Password} | passwd ${User} --stdin 1>/dev/null
+   validation_func "/usr/sbin/userdel -r ${User}" "echo 'Error : set user password'"
+
+   mkdir -p /home/${User}/uploads/Live_Recorders
+   mkdir -p /home/${User}/logs/statistics
+   mkdir -p /home/${User}/logs/videostatistics
+   mkdir /home/${User}/playlist
+   mkdir /home/${User}/imgs
+   mkdir -p /home/${User}/live-streaming/hls
+   mkdir -p /home/${User}/stream/hls
+   mkdir -p /home/${User}/stream-hybrid/hls
+   mkdir /home/${User}/data
+   echo "0" > /home/${User}/data/bandwidth
+   chmod 777 -R /home/${User}
+   chown -R ${User}.vdopanel /home/${User}
+
+   /usr/sbin/setquota -u ${User} ${Storage}M ${Storage}M 0 0 /
+   #validation_func "/usr/sbin/userdel -r ${User}" "echo 'Error : set storage'"
+
+   NGX_CONF="/etc/nginx/conf.d"
+   SOU_CONF="/home/vdopanel/core/conf-templates"
+
+   cat ${SOU_CONF}/nginx-user-rtmp_psk.conf > ${NGX_CONF}/${User}-rtmp.conf
+   sed -i "s/_PORT_/${Port_rtmp}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_APPNAME_/show/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_publish_IP_/${SERV_IP}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_SERV_IP_/${SERV_IP}/g" "${NGX_CONF}/${User}-rtmp.conf"
+#   sed -i "s/_BitRate_/${Bitrate}/g" "${NGX_CONF}/${User}-rtmp.conf"
+#   if [ ${Bitrate} = "288" ]; then
+#	Resolution="_low"
+#   elif [ ${Bitrate} = "448" ]; then
+#	Resolution="_mid"
+#   elif [ ${Bitrate} = "1152" ]; then
+#	Resolution="_high"
+#   elif [ ${Bitrate} = "2048" ]; then
+#	Resolution="_hd720"
+#   elif [ ${Bitrate} = "4096" ]; then
+#	Resolution="_src"
+#   elif [ ${Bitrate} = "90000" ]; then
+#        Resolution="_src2"
+#   fi
+#   sed -i "s/_Resolution_/${Resolution}/g" "${NGX_CONF}/${User}-rtmp.conf"
+
+   if [[ ${B_Type} != 3 ]]; then
+	sed -i "/push-to-hybrid/c\            # push-to-hybrid" "${NGX_CONF}/${2}-rtmp.conf"
+   fi
+
+   if [ ${Domain} = ${SERV_IP} ]; then
+	cat ${SOU_CONF}/nginx-user-http.conf > ${NGX_CONF}/${User}-http.http
+	sed -i "s/_PORT_/${Port_http}/g" "${NGX_CONF}/${User}-http.http"
+	sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-http.http"
+   else
+	cat ${SOU_CONF}/nginx-user-http_ssl.conf > ${NGX_CONF}/${User}-http.http
+	sed -i "s/_PORT_/${Port_http}/g" "${NGX_CONF}/${User}-http.http"
+	sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-http.http"
+	sed -i "s/_DOMAIN_/${Domain}/g" "${NGX_CONF}/${User}-http.http"
+   fi
+
+   /bin/systemctl reload nginx.service
+   validation_func "/usr/sbin/userdel -r ${User}" "rm -rf ${NGX_CONF}/${User}-rtmp.conf ${NGX_CONF}/${User}-rtmp.conf_suspend ${NGX_CONF}/${User}-http.http" "echo 'nginx configuration error.'"
+   /home/vdopanel/core/utils statistics ${User} now >/dev/null 2>&1
+   echo -e "local_root=/home/${User}/uploads\nwrite_enable=YES\n" > /etc/vsftpd/users_config/${User}
+
+   echo -e "## _${User}_vdo
+[${User}-fb-live]
+client = yes
+accept = ${Port_stunn}
+connect = live-api-s.facebook.com:443\n" >> /etc/stunnel/stunnel.conf
+   /bin/systemctl restart stunnel
+
+   if [ ${ViewerL} != 0 ]; then
+	/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${Port_http},${Port_rtmp} -m connlimit --connlimit-above ${ViewerL} --connlimit-mask 0 -j REJECT >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "Error happened when set viewer limit, but account created without limit"
+	else
+		service iptables save >/dev/null 2>&1
+	fi	
+   fi
+
+   echo -e "success-done"
+
+
+
+
+else
+
+
+
+
+   if [ -d /home/vdopanel/users/${User} ];then
+	echo -e "Error : directory already exists."
+	exit -1
+   fi
+
+   mkdir /home/vdopanel/users/${User}
+   validation_func "echo 'Error : set user'"
+
+   mkdir -p /home/vdopanel/users/${User}/uploads/Live_Recorders
+   mkdir -p /home/vdopanel/users/${User}/logs/statistics
+   mkdir -p /home/vdopanel/users/${User}/logs/videostatistics
+   mkdir /home/vdopanel/users/${User}/playlist
+   mkdir /home/vdopanel/users/${User}/imgs
+   mkdir -p /home/vdopanel/users/${User}/live-streaming/hls
+   mkdir -p /home/vdopanel/users/${User}/stream/hls
+   mkdir -p /home/vdopanel/users/${User}/stream-hybrid/hls
+   mkdir /home/vdopanel/users/${User}/data
+   echo "0" > /home/vdopanel/users/${User}/data/bandwidth
+   chmod 777 -R /home/vdopanel/users/${User}
+   chown -R vdopanel.vdopanel /home/vdopanel/users/${User}
+
+   CR_FTP=`/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp addftp user=${User} pass=${Password} quota=${Storage} homedir=users/${User}/uploads | grep "error:"`
+   if [[ ${CR_FTP} == *"error:"* ]]; then
+	echo -e "Error : Create ftp account."
+	exit -1
+   fi
+
+   NGX_CONF="/etc/nginx/conf.d"
+   SOU_CONF="/home/vdopanel/core/conf-templates"
+   cat ${SOU_CONF}/nginx-user-rtmp_psk.conf > ${NGX_CONF}/${User}-rtmp.conf
+   sed -i "s/_PORT_/${Port_rtmp}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/home\/_USER_/home\/vdopanel\/users\/${User}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_APPNAME_/show/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_publish_IP_/${SERV_IP}/g" "${NGX_CONF}/${User}-rtmp.conf"
+   sed -i "s/_SERV_IP_/${SERV_IP}/g" "${NGX_CONF}/${User}-rtmp.conf"
+#   sed -i "s/_BitRate_/${Bitrate}/g" "${NGX_CONF}/${User}-rtmp.conf"
+#   if [ ${Bitrate} = "288" ]; then
+#	Resolution="_low"
+#   elif [ ${Bitrate} = "448" ]; then
+#	Resolution="_mid"
+#   elif [ ${Bitrate} = "1152" ]; then
+#	Resolution="_high"
+#   elif [ ${Bitrate} = "2048" ]; then
+#	Resolution="_hd720"
+#   elif [ ${Bitrate} = "4096" ]; then
+#	Resolution="_src"
+#   elif [ ${Bitrate} = "90000" ]; then
+#	Resolution="_src2"
+#   fi
+#   sed -i "s/_Resolution_/${Resolution}/g" "${NGX_CONF}/${User}-rtmp.conf"
+
+   if [[ ${B_Type} != 3 ]]; then
+	sed -i "/push-to-hybrid/c\            # push-to-hybrid" "${NGX_CONF}/${2}-rtmp.conf"
+   fi
+
+   if [ ${Domain} = ${SERV_IP} ]; then
+        cat ${SOU_CONF}/nginx-user-http_cpanel.conf > ${NGX_CONF}/${User}-http.http
+        sed -i "s/_PORT_/${Port_http}/g" "${NGX_CONF}/${User}-http.http"
+        sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-http.http"
+   else
+	MAIN_DO=`cat /home/vdopanel/public_html/.env | grep APP_URL= | cut -d"/" -f3`
+        cat ${SOU_CONF}/nginx-user-http_ssl_cpanel.conf > ${NGX_CONF}/${User}-http.http
+        sed -i "s/_PORT_/${Port_http}/g" "${NGX_CONF}/${User}-http.http"
+        sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${User}-http.http"
+        sed -i "s/_DOMAIN_/${Domain}/g" "${NGX_CONF}/${User}-http.http"
+	sed -i "s/_DOMAIN2_/${MAIN_DO}/g" "${NGX_CONF}/${User}-http.http"
+   fi
+
+   /bin/systemctl reload nginx.service
+   validation_func "/usr/local/cpanel/bin/cpapi2 --user=vdopanel Ftp delftp user=${User} destroy=1 >/dev/null 2>&1" "rm -rf /home/vdopanel/users/${User} ${NGX_CONF}/${User}-rtmp.conf ${NGX_CONF}/${User}-rtmp.conf_suspend ${NGX_CONF}/${User}-http.http" "echo 'nginx configuration error.'"
+   /home/vdopanel/core/utils statistics ${User} now >/dev/null 2>&1
+
+   echo -e "## _${User}_vdo
+[${User}-fb-live]
+client = yes
+accept = ${Port_stunn}
+connect = live-api-s.facebook.com:443\n" >> /etc/stunnel/stunnel.conf
+   /bin/systemctl restart stunnel
+
+   if [ ${ViewerL} != 0 ]; then
+	/usr/sbin/iptables -A INPUT -p tcp --match multiport --dports ${Port_http},${Port_rtmp} -m connlimit --connlimit-above ${ViewerL} --connlimit-mask 0 -j REJECT >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "Error happened when set viewer limit, but account created without limit"
+	else
+		service iptables save >/dev/null 2>&1
+	fi
+   fi
+
+   echo -e "success-done"
+fi

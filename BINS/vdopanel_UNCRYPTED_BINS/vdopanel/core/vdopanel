@@ -1,0 +1,62 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -lt 1 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+validation_func()
+{
+ if [ $? -ne 0 ]; then
+	${1}
+	exit -1
+ fi
+}
+
+export Option=$1
+cPanel_chk="/usr/local/cpanel/version"
+
+if [ ${Option} = "resetadmin" ]; then
+	/home/vdopanel/core/utils resetadmin admin
+fi
+
+if [ ${Option} = "update" ]; then
+	/home/vdopanel/core/utils update do
+fi
+
+if [ ${Option} = "install-phpmyadmin" ]; then
+	/home/vdopanel/core/utils phpmyadmin install
+fi
+
+if [ ${Option} = "restart" ]; then
+	if [ ${2} = "nginx" ]; then
+		/bin/systemctl restart nginx.service
+		validation_func "echo 'Error : when restart nginx service'"
+		echo -e "nginx service restarted successfully"
+	elif [ ${2} = "stunnel" ]; then
+		/bin/systemctl daemon-reload
+		/bin/systemctl restart stunnel.service
+		validation_func "echo 'Error : when restart stunnel service'"
+		echo -e "stunnel service restarted successfully"
+	elif [ ${2} = "ftp" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			/bin/systemctl restart vsftpd
+			validation_func "echo 'Error : when restart FTP service'"
+			echo -e "FTP service restarted successfully"
+		else
+			echo -e "This is cPanel server please restart ftp from WHM"
+		fi
+	elif [ ${2} = "php-fpm" ]; then
+		if [ ! -f ${cPanel_chk} ]; then
+			/bin/systemctl restart php-fpm.service
+			validation_func "echo 'Error : when restart php-fpm service'"
+			/bin/systemctl restart nginx.service
+			validation_func "echo 'Error : when restart php-fpm service'"
+			echo -e "php-fpm service restarted successfully"
+		else
+			echo -e "This is cPanel server please restart from WHM"
+		fi
+	fi
+fi

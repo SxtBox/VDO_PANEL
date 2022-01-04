@@ -1,0 +1,861 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+ARGC_NoLimit()
+{
+ if [ $ARGC -lt ${1} ]; then
+	echo "invalid option : this option must be contain ${1} ARGC or more."
+	exit -1
+ fi
+}
+
+ARGC_NoLimit 1 1
+
+ARGC_Limit()
+{
+ if [ $ARGC -ne ${1} ]; then
+	echo "invalid option : this option must be contain ${2} ARGC"
+	exit -1
+ fi
+}
+
+DATE_S()
+{
+	date '+%a %d-%b-%Y %I:%M:%S %p %Z'
+}
+
+COUNT=0
+Backup_log1="/home/vdopanel/core/logs/backup-log"
+Backup_log2="/home/vdopanel/core/logs/backup-log-remote"
+Backup_log3="/home/vdopanel/core/logs/backup-log-manually"
+Restore_log="/home/vdopanel/core/logs/restore-log"
+Transfer_log="/home/vdopanel/core/logs/transfer-log"
+SERV_IP=`dig TXT +short o-o.myaddr.l.google.com @ns1.google.com -4 | tr -d '"'`
+
+LOGS_Func1()
+{
+	echo -e ${1} >> ${2}
+}
+LOGS_Func2()
+{
+ if [ $? -ne 0 ]; then
+	echo -e "\t[*] Fail and Error : ${1}" >> ${3}
+	echo -e "\t[*] Backup Status : Failed for [ ${2} ]" >> ${3}
+	COUNT=$((COUNT +1))
+	if [ ${4} = "exit_now" ]; then
+		LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='fail'" ${3}
+		exit -1
+	fi
+ else
+	echo -e "\t Success : ${1}" >> ${3}
+ fi
+}
+
+COMM_SSH_FUNC()
+{
+	sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "${1}"
+}
+SYNC_FUNC()
+{
+	rsync -avz \
+	--recursive \
+	--rsh="sshpass -p ${REMOTE_PASS} ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no -l ${REMOTE_USER}" \
+	${1} >/dev/null 2>&1
+}
+
+export Option=$1
+
+Pre_="admin"
+ENV_F="/home/vdopanel/public_html/.env"
+DB_NAME=`cat ${ENV_F} | grep DB_DATABASE= | cut -d"=" -f2`
+NGX_CONF="/etc/nginx/conf.d"
+Backup_PATH="/home/vdopanel/backup"
+TEM_CONF="/home/vdopanel/core/conf-templates"
+TMP_PATH="/home/vdopanel/core/tmp"
+cPanel_chk="/usr/local/cpanel/version"
+if [ ! -f ${cPanel_chk} ]; then
+	cPanel_check="nocpanel"
+	USER_PATH_="/home"
+	PHP_RUN="/usr/bin/php"
+else
+	cPanel_check="cpanel"
+	USER_PATH_="/home/vdopanel/users"
+	PHP_CHK=`/usr/local/cpanel/bin/whmapi1 php_get_installed_versions | grep ea-php`
+	if [[ ${PHP_CHK} == *"ea-php74"* ]]; then
+		PHP_RUN="/usr/local/bin/ea-php74"
+	elif [[ ${PHP_CHK} == *"ea-php73"* ]]; then
+		PHP_RUN="/usr/local/bin/ea-php73"
+	elif [[ ${PHP_CHK} == *"ea-php72"* ]]; then
+		PHP_RUN="/usr/local/bin/ea-php72"
+	else
+		PHP_RUN="/usr/local/bin/php"
+	fi
+fi
+
+DB_INFO()
+{
+	mysql ${DB_NAME} -e "SELECT ${1} FROM ${2} ${3}\G" | grep -v ". row" | awk '{print $2}'
+}
+
+REMOTE_HOST_CONF()
+{
+	REMOTE_HOST=`DB_INFO server_ip backups`
+	REMOTE_PORT=`DB_INFO server_port backups`
+	REMOTE_USER=`DB_INFO server_user backups`
+	REMOTE_PASS=`DB_INFO server_password backups`
+	REMOTE_DEST=`DB_INFO server_destination backups`
+
+	Backup_Enable=`DB_INFO local_status backups`
+	CHK_Scheduling_Daily=`DB_INFO local_daily backups`
+	CHK_Scheduling_Weekly=`DB_INFO local_weekly backups`
+	Backup_Enable_Remote=`DB_INFO remote_status backups`
+	CHK_Scheduling_Daily_Remote=`DB_INFO remote_daily backups`
+	CHK_Scheduling_Weekly_Remote=`DB_INFO remote_weekly backups`
+}
+
+LARA_DB_COMM()
+{
+ DB_COMM=`${PHP_RUN} /home/vdopanel/public_html/artisan backup:broadcaster ${i}`
+ LOGS_Func2 "Run and connect laravel artisan command line for datbase.." ${1} ${3}
+ if [[ ${DB_COMM} == *"error"*  ]]; then
+	LOGS_Func1 "\t[*] Fail and Error : ${DB_COMM}.." ${3}
+	rm -rf ${TMP_PATH}/${1}.sql
+ else
+	if [[ ${2} == "REMOTE_DO" ]]; then
+		SYNC_FUNC "${TMP_PATH}/${1}.sql ${REMOTE_HOST}:${REMOTE_DEST}/${4}/broadcasters/${1}/database"
+	else
+		${2}
+	fi
+	LOGS_Func2 "Complete database backup.." ${1} ${3}
+	rm -rf ${TMP_PATH}/${1}.sql
+ fi
+}
+
+########################################################################################
+############################# [ fullbackup-all-${Pre_} ] ###############################
+
+if [ ${Option} = "fullbackup-all-${Pre_}" ]; then
+   BROD_LIST_FUNC()
+   {
+	echo -e "[ Start ${3} [ ${1} ] full backup progress ].. TIME.[ $(DATE_S) ]\n" > ${2}
+	Broadcasters_List=`DB_INFO name broadcasters`
+	if [[ ! ${Broadcasters_List} ]]; then
+		LOGS_Func1 "[ Error : in database result when get users list ].." ${2}
+		exit -1
+	fi
+	LOGS_Func1 "[ Success : get Broadcasters list to start full backup ].. TIME.[ $(DATE_S) ]" ${2}
+   }
+
+   BACKUP_FUNC()
+   {
+	BROD_LIST_FUNC ${1} ${Backup_log1} Local
+
+	LOGS_Func1 "- Start backup for main vdopanel software.. TIME.[ $(DATE_S) ]" ${Backup_log1}
+
+	mkdir -p ${Backup_PATH}/${1}/main-software/public_html 2>> ${Backup_log1}
+	LOGS_Func2 "Create main-software [ public_html ] directory.." "[ main-software ]" ${Backup_log1}
+
+	mkdir -p ${Backup_PATH}/${1}/main-software/database 2>> ${Backup_log1}
+	LOGS_Func2 "Create main-software [ database ] directory.." "[ main-software ]" ${Backup_log1}
+
+	Exclude_F="--exclude=core/main-software* --exclude=core/*.sql"
+	rsync -avz ${Exclude_F} --delete-after /home/vdopanel/core ${Backup_PATH}/${1}/main-software >/dev/null 2>&1
+	LOGS_Func2 "rsync main-software core files for backup.." "[ main-software ]" ${Backup_log1}
+
+	mysqldump ${DB_NAME} > ${Backup_PATH}/${1}/main-software/database/${DB_NAME}.sql
+	LOGS_Func2 "Dump vdopanel database for backup.." "[ main-software ]" ${Backup_log1}
+
+	mount --bind -r /home/vdopanel/public_html ${Backup_PATH}/${1}/main-software/public_html
+	LOGS_Func2 "mount main-software public_html for backup.." "[ main-software ]" ${Backup_log1}
+
+	cd ${Backup_PATH}/${1}
+	tar -czf ${Backup_PATH}/${1}/main-software.tar.gz main-software
+	LOGS_Func1 "\t Success : Compression main-software backup folder.." ${Backup_log1}
+	umount ${Backup_PATH}/${1}/main-software/public_html
+	LOGS_Func2 "Umount broadcaster folder..\n" "[ main-software ]" ${Backup_log1}
+	rm -rf ${Backup_PATH}/${1}/main-software
+
+	LOGS_Func1 "- Start backup for broadcasters.. TIME.[ $(DATE_S) ]" ${Backup_log1}
+	for i in ${Broadcasters_List}
+	do
+		LOGS_Func1 "- Start full backup for [ ${i} ].. TIME.[ $(DATE_S) ]" ${Backup_log1}
+		mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/home_dir 2>> ${Backup_log1}
+		LOGS_Func2 "Create [ home_dir ] directory.." ${i} ${Backup_log1}
+
+		mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/database 2>> ${Backup_log1}
+		LOGS_Func2 "Create [ database ] directory.." ${i} ${Backup_log1}
+
+		mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/con-files 2>> ${Backup_log1}
+		LOGS_Func2 "Create [ con-files ] directory.." ${i} ${Backup_log1}
+
+		mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files 2>> ${Backup_log1}
+		LOGS_Func2 "Create [ ssl-files ] directory.." ${i} ${Backup_log1}
+
+		echo > ${Backup_PATH}/${1}/broadcasters/${i}/.vdo-backup 2>> ${Backup_log1}
+		LOGS_Func2 "Create [ .vdo-backup ] file.." ${i} ${Backup_log1}
+
+		if [ -f ${cPanel_chk} ]; then
+			echo > ${Backup_PATH}/${1}/broadcasters/${i}/.vdo-cpanel 2>> ${Backup_log1}
+			LOGS_Func2 "Create [ .vdo-cpanel ] file.." ${i} ${Backup_log1}
+		fi
+
+		LARA_DB_COMM ${i} "rsync -avz ${TMP_PATH}/${i}.sql ${Backup_PATH}/${1}/broadcasters/${i}/database" ${Backup_log1}
+
+		rsync -avz --delete-after --exclude=stream/*/* --exclude=live-streaming/*/* --exclude=stream-hybrid/*/* ${USER_PATH_}/${i} ${Backup_PATH}/${1}/broadcasters/${i}/home_dir >/dev/null 2>&1
+		LOGS_Func2 "rsync broadcaster files for backup.." ${i} ${Backup_log1}
+
+		rm -rf ${Backup_PATH}/${1}/broadcasters/${i}/con-files/*
+		rsync -avz --delete-after ${NGX_CONF}/${i}-* ${Backup_PATH}/${1}/broadcasters/${i}/con-files >/dev/null 2>&1
+		LOGS_Func2 "rsync broadcaster nginx config files for backup.." ${i} ${Backup_log1}
+
+		if [ ! -f ${cPanel_chk} ]; then
+			rsync -avz /etc/vsftpd/users_config/${i} ${Backup_PATH}/${1}/broadcasters/${i}/con-files >/dev/null 2>&1
+			LOGS_Func2 "rsync broadcaster FTP config file for backup.." ${i} ${Backup_log1}
+		fi
+
+		SSL_DO1=`DB_INFO domain broadcasters "WHERE name='${i}'"`
+		if [ ${SSL_DO1} != "NULL" ]; then
+			if [ ! -f ${cPanel_chk} ]; then
+				mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/live 2>> ${Backup_log1}
+				LOGS_Func2 "Create [ live ] directory under ssl-files directory.." ${i} ${Backup_log1}
+				mkdir -p ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/archive 2>> ${Backup_log1}
+				LOGS_Func2 "Create [ archive ] directory under ssl-files directory.." ${i} ${Backup_log1}
+
+				rm -rf ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/live/*
+				rm -rf ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/archive/*
+				LOGS_Func2 "Delete broadcaster old ssl files.." ${i} ${Backup_log1}
+				rsync -avz --delete-after /etc/letsencrypt/live/${SSL_DO1} ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/live >/dev/null 2>&1
+				LOGS_Func2 "rsync broadcaster ssl files from [ live ] directory for backup.." ${i} ${Backup_log1}
+				rsync -avz --delete-after /etc/letsencrypt/archive/${SSL_DO1} ${Backup_PATH}/${1}/broadcasters/${i}/ssl-files/archive >/dev/null 2>&1
+				LOGS_Func2 "rsync broadcaster ssl files from [ archive ] directory for backup.." ${i} ${Backup_log1}
+			else
+				echo "DOMAIN_SSL=${SSL_DO1}" > ${Backup_PATH}/${1}/broadcasters/${i}/.vdo-cpanel 2>> ${Backup_log1}
+				LOGS_Func2 "Add ssl domain name to [ .vdo-cpanel ] file.." ${i} ${Backup_log1}
+			fi
+		fi
+
+		chown -R root.root ${Backup_PATH}
+		echo -e "Full backup for ${i} done."
+		continue
+	done
+   }
+
+
+   BACKUP_FUNC_REMOTE()
+   {
+	BROD_LIST_FUNC ${1} ${Backup_log2} Remote
+	REMOTE_HOST_CONF
+
+	LOGS_Func1 "- Start backup for main vdopanel software.. TIME.[ $(DATE_S) ]" ${Backup_log2}
+	COMM_SSH_FUNC "hostname >/dev/null 2>&1"
+	LOGS_Func2 "Connect to remote host.." "Remote host not connected" ${Backup_log2} "exit_now"
+
+	COMM_SSH_FUNC "mkdir -p ${REMOTE_DEST}/${1} >/dev/null 2>&1"
+	LOGS_Func2 "create ${1} directory for remote backup.." "[ main-software ]" ${Backup_log2}
+
+	mkdir -p ${TMP_PATH}/main-software/public_html 2>> ${Backup_log2}
+	LOGS_Func2 "Create main-software [ public_html ] directory.." "[ main-software ]" ${Backup_log2}
+
+	mkdir -p ${TMP_PATH}/main-software/database 2>> ${Backup_log2}
+	LOGS_Func2 "Create main-software [ database ] directory.." "[ main-software ]" ${Backup_log2}
+
+	Exclude_F="--exclude=core/main-software* --exclude=core/*.sql"
+	rsync -avz ${Exclude_F} --delete-after /home/vdopanel/core ${TMP_PATH}/main-software >/dev/null 2>&1
+	LOGS_Func2 "rsync main-software core files for backup.." "[ main-software ]" ${Backup_log2}
+
+	mysqldump ${DB_NAME} > ${TMP_PATH}/main-software/database/${DB_NAME}.sql
+	LOGS_Func2 "Dump vdopanel database for backup.." "[ main-software ]" ${Backup_log2}
+
+	mount --bind -r /home/vdopanel/public_html ${TMP_PATH}/main-software/public_html
+	LOGS_Func2 "mount main-software public_html for backup.." "[ main-software ]" ${Backup_log2}
+
+	cd ${TMP_PATH}
+	tar -czf ${TMP_PATH}/main-software.tar.gz main-software
+	LOGS_Func1 "\t Success : Compression main-software backup folder.." ${Backup_log2}
+	umount ${TMP_PATH}/main-software/public_html
+	LOGS_Func2 "Umount broadcaster folder.." "[ main-software ]" ${Backup_log2}
+	rm -rf ${TMP_PATH}/main-software
+
+	SYNC_FUNC "${TMP_PATH}/main-software.tar.gz ${REMOTE_HOST}:${REMOTE_DEST}/${1}"
+	LOGS_Func2 "rsync main-software file for backup..\n" "[ main-software ]" ${Backup_log2}
+
+	LOGS_Func1 "- Start backup for broadcasters.. TIME.[ $(DATE_S) ]" ${Backup_log2}
+	for i in ${Broadcasters_List}
+	do
+		LOGS_Func1 "- Start full backup for [ ${i} ].. TIME.[ $(DATE_S) ]" ${Backup_log2}
+
+		COMM_SSH_FUNC "mkdir -p ${REMOTE_DEST}/${1}/broadcasters/${i}/home_dir >/dev/null 2>&1"
+		LOGS_Func2 "Create [ home_dir ] directory.." ${i} ${Backup_log2}
+
+		Exclude_F="--exclude=stream/*/* --exclude=live-streaming/*/* --exclude=stream-hybrid/*/*"
+		SYNC_FUNC "${Exclude_F} --delete-after ${USER_PATH_}/${i} ${REMOTE_HOST}:${REMOTE_DEST}/${1}/broadcasters/${i}/home_dir"
+		LOGS_Func2 "rsync broadcaster files for backup.." ${i} ${Backup_log2}
+
+		COMM_SSH_FUNC "mkdir -p ${REMOTE_DEST}/${1}/broadcasters/${i}/database >/dev/null 2>&1"
+		LOGS_Func2 "Create [ database ] directory.." ${i} ${Backup_log2}
+
+		COMM_SSH_FUNC "rm -rf ${REMOTE_DEST}/${1}/broadcasters/${i}/con-files >/dev/null 2>&1"
+		LOGS_Func2 "Delete broadcaster old nginx config files.." ${i} ${Backup_log2}
+
+		COMM_SSH_FUNC "mkdir -p ${REMOTE_DEST}/${1}/broadcasters/${i}/con-files >/dev/null 2>&1"
+		LOGS_Func2 "Create [ con-files ] directory.." ${i} ${Backup_log2}
+
+		COMM_SSH_FUNC "echo > ${REMOTE_DEST}/${1}/broadcasters/${i}/.vdo-backup"
+		LOGS_Func2 "Create [ .vdo-backup ] file.." ${i} ${Backup_log2}
+
+		if [ -f ${cPanel_chk} ]; then
+			COMM_SSH_FUNC "echo > ${REMOTE_DEST}/${1}/broadcasters/${i}/.vdo-cpanel"
+			LOGS_Func2 "Create [ .vdo-cpanel ] file.." ${i} ${Backup_log2}
+		fi
+
+		LARA_DB_COMM ${i} REMOTE_DO ${Backup_log2} ${1}
+
+		SYNC_FUNC "--delete-after ${NGX_CONF}/${i}-* ${REMOTE_HOST}:${REMOTE_DEST}/${1}/broadcasters/${i}/con-files"
+		LOGS_Func2 "rsync broadcaster nginx config files for backup.." ${i} ${Backup_log2}
+
+		if [ ! -f ${cPanel_chk} ]; then
+			SYNC_FUNC "/etc/vsftpd/users_config/${i} ${REMOTE_HOST}:${REMOTE_DEST}/${1}/broadcasters/${i}/con-files"
+			LOGS_Func2 "rsync broadcaster FTP config file for backup.." ${i} ${Backup_log2}
+		fi
+
+		SSL_DO1=`DB_INFO domain broadcasters "WHERE name='${i}'"`
+		if [ ${SSL_DO1} != "NULL" ]; then
+			if [ ! -f ${cPanel_chk} ]; then
+				COMM_SSH_FUNC "rm -rf ${REMOTE_DEST}/${1}/broadcasters/${i}/ssl-files >/dev/null 2>&1"
+				LOGS_Func2 "Delete broadcaster old ssl files.." ${i} ${Backup_log2}
+
+				COMM_SSH_FUNC "mkdir -p ${REMOTE_DEST}/${1}/broadcasters/${i}/ssl-files/live ${REMOTE_DEST}/${1}/broadcasters/${i}/ssl-files/archive >/dev/null 2>&1"
+				LOGS_Func2 "Create [ ssl-files ] directories.." ${i} ${Backup_log2}
+
+				SYNC_FUNC "--delete-after /etc/letsencrypt/live/${SSL_DO1} ${REMOTE_HOST}:${REMOTE_DEST}/${1}/broadcasters/${i}/ssl-files/live"
+				LOGS_Func2 "rsync broadcaster ssl files from [ live ] directory for backup.." ${i} ${Backup_log2}
+				SYNC_FUNC "--delete-after /etc/letsencrypt/archive/${SSL_DO1} ${REMOTE_HOST}:${REMOTE_DEST}/${1}/broadcasters/${i}/ssl-files/archive"
+				LOGS_Func2 "rsync broadcaster ssl files from [ archive ] directory for backup.." ${i} ${Backup_log2}
+			else
+				COMM_SSH_FUNC "echo DOMAIN_SSL=${SSL_DO1} > ${REMOTE_DEST}/${1}/broadcasters/${i}/.vdo-cpanel"
+				LOGS_Func2 "Add ssl domain name to [ .vdo-cpanel ] file.." ${i} ${Backup_log2}	
+			fi
+		fi
+
+		echo -e "Remote full backup for ${i} done."
+		continue
+	done
+	rm -rf ${TMP_PATH}/main-software.tar.gz
+   }
+
+
+	REMOTE_HOST_CONF
+	DATE_=$(date +%u)
+
+	Scheduling_COUNT1=0
+	Scheduling_COUNT2=0
+	if [ ${Backup_Enable} = 1 ]; then
+		mkdir -p ${Backup_PATH}
+		if [ ${CHK_Scheduling_Daily} = 1 ]; then
+			BACKUP_FUNC daily
+			Scheduling_COUNT1=$((Scheduling_COUNT1 +1))
+			Scheduling_COUNT2=$((Scheduling_COUNT2 +1))
+		fi
+		if [ ${CHK_Scheduling_Weekly} = 1 ]; then
+			if [ ${DATE_} = 7 ]; then
+				Scheduling_COUNT2=$((Scheduling_COUNT2 +1))
+				if [ ${Scheduling_COUNT1} = 0 ]; then
+					BACKUP_FUNC weekly
+				else
+					echo -e "\n[ Start [ weekly ] full backup progress ].. TIME.[ $(DATE_S) ]" >> ${Backup_log1}
+					rsync -avz --delete-after ${Backup_PATH}/daily/* ${Backup_PATH}/weekly >/dev/null 2>&1
+					LOGS_Func2 "rsync daily backup files for weekly backup.." ${i} ${Backup_log1}
+				fi
+			fi
+		fi
+
+		if [ ${Scheduling_COUNT2} != 0 ]; then
+			if [ ${COUNT} = 0 ]; then
+				LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='success'" ${Backup_log1}
+			else
+				LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='fail'" ${Backup_log1}
+			fi
+		fi
+	fi
+
+
+	COUNT=0
+	Scheduling_COUNT1=0
+	Scheduling_COUNT2=0
+	if [ ${Backup_Enable_Remote} = 1 ]; then
+		if [ ${CHK_Scheduling_Daily_Remote} = 1 ]; then
+			BACKUP_FUNC_REMOTE daily
+			Scheduling_COUNT1=$((Scheduling_COUNT1 +1))
+			Scheduling_COUNT2=$((Scheduling_COUNT2 +1))
+		fi
+		if [ ${CHK_Scheduling_Weekly_Remote} = 1 ]; then
+			if [ ${DATE_} = 7 ]; then
+				Scheduling_COUNT2=$((Scheduling_COUNT2 +1))
+				if [ ${Scheduling_COUNT1} = 0 ]; then
+					BACKUP_FUNC_REMOTE weekly
+				else
+					echo -e "\n[ Start Remote [ weekly ] full backup progress ].. TIME.[ $(DATE_S) ]" >> ${Backup_log2}
+					COMM_SSH_FUNC "rsync -avz --delete-after --recursive ${REMOTE_DEST}/daily/* ${REMOTE_DEST}/weekly >/dev/null 2>&1"
+					LOGS_Func2 "rsync remote daily backup files for weekly backup.." ${i} ${Backup_log2}
+				fi
+			fi
+		fi
+
+		if [ ${Scheduling_COUNT2} != 0 ]; then
+			if [ ${COUNT} = 0 ]; then
+				LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='success'" ${Backup_log2}
+			else
+				LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='fail'" ${Backup_log2}
+			fi
+		fi
+	fi
+fi
+
+########################################################################################
+############################# [ manually-${Pre_} USERS.. ] #############################
+
+if [ ${Option} = "manually-${Pre_}" ]; then
+	ARGC_NoLimit 2 2
+	M_B_PATH="/home"
+	echo -e "[ Start manually full backup progress ].. TIME.[ $(DATE_S) ]\n" > ${Backup_log3}
+	FirstARG=${1}
+	shift
+	for i in "$@"
+	do
+		LOGS_Func1 "- Start manually full backup for [ ${i} ].. TIME.[ $(DATE_S) ]" ${Backup_log3}
+		LOGS_Func1 "\t Prepare to create [ home_dir ] folder.." ${Backup_log3}
+		mkdir -p ${M_B_PATH}/vdo-${i}/home_dir 2>> ${Backup_log3}
+		LOGS_Func2 "Create [ home_dir ] directory.." ${i} ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to create [ database ] folder.." ${Backup_log3}
+		mkdir -p ${M_B_PATH}/vdo-${i}/database 2>> ${Backup_log3}
+		LOGS_Func2 "Create [ database ] directory.." ${i} ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to create [ con-files ] folder.." ${Backup_log3}
+		mkdir -p ${M_B_PATH}/vdo-${i}/con-files 2>> ${Backup_log3}
+		LOGS_Func2 "Create [ con-files ] directory.." ${i} ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to create [ ssl-files ] folder.." ${Backup_log3}
+		mkdir -p ${M_B_PATH}/vdo-${i}/ssl-files 2>> ${Backup_log3}
+		LOGS_Func2 "Create [ ssl-files ] directory.." ${i} ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to create [ .vdo-backup ] file.." ${Backup_log3}
+		echo > ${M_B_PATH}/vdo-${i}/.vdo-backup 2>> ${Backup_log3}
+		LOGS_Func2 "Create [ .vdo-backup ] file.." ${i} ${Backup_log3}
+
+		if [ -f ${cPanel_chk} ]; then
+			LOGS_Func1 "\t Prepare to create [ .vdo-cpanel ] file.." ${Backup_log3}
+			echo > ${M_B_PATH}/vdo-${i}/.vdo-cpanel 2>> ${Backup_log3}
+			LOGS_Func2 "Create [ .vdo-cpanel ] file.." ${i} ${Backup_log3}
+		fi
+
+		LOGS_Func1 "\t Prepare to dump database file.." ${Backup_log3}
+		LARA_DB_COMM ${i} "rsync -avz ${TMP_PATH}/${i}.sql ${M_B_PATH}/vdo-${i}/database" ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to mount broadcaster files to backup folder.." ${Backup_log3}
+		mkdir -p ${M_B_PATH}/vdo-${i}/home_dir/${i}
+		mount --bind -r ${USER_PATH_}/${i} ${M_B_PATH}/vdo-${i}/home_dir/${i}
+		LOGS_Func2 "mount broadcaster files for backup.." ${i} ${Backup_log3}
+
+		LOGS_Func1 "\t Prepare to rsync broadcaster nginx config files.." ${Backup_log3}
+		rm -rf ${M_B_PATH}/vdo-${i}/con-files/*
+		rsync -avz --delete-after ${NGX_CONF}/${i}-* ${M_B_PATH}/vdo-${i}/con-files >/dev/null 2>&1
+		LOGS_Func2 "rsync broadcaster nginx config files for backup.." ${i} ${Backup_log3}
+
+		if [ ! -f ${cPanel_chk} ]; then
+			LOGS_Func1 "\t Prepare to rsync broadcaster FTP config file.." ${Backup_log3}
+			rsync -avz /etc/vsftpd/users_config/${i} ${M_B_PATH}/vdo-${i}/con-files >/dev/null 2>&1
+			LOGS_Func2 "rsync broadcaster FTP config file for backup.." ${i} ${Backup_log3}
+		fi
+
+		SSL_DO1=`DB_INFO domain broadcasters "WHERE name='${i}'"`
+		if [ ${SSL_DO1} != "NULL" ]; then
+			if [ ! -f ${cPanel_chk} ]; then
+				LOGS_Func1 "\t Prepare to rsync broadcaster ssl files from [ live ] directory.." ${Backup_log3}
+				rsync -avz --delete-after /etc/letsencrypt/live/${SSL_DO1} ${M_B_PATH}/vdo-${i}/ssl-files/live >/dev/null 2>&1
+				LOGS_Func2 "rsync broadcaster ssl files from [ live ] directory for backup.." ${i} ${Backup_log3}
+				LOGS_Func1 "\t Prepare to rsync broadcaster ssl files from [ archive ] directory.." ${Backup_log3}
+				rsync -avz --delete-after /etc/letsencrypt/archive/${SSL_DO1} ${M_B_PATH}/vdo-${i}/ssl-files/archive >/dev/null 2>&1
+				LOGS_Func2 "rsync broadcaster ssl files from [ archive ] directory for backup.." ${i} ${Backup_log3}
+			else
+				echo "DOMAIN_SSL=${SSL_DO1}" > ${M_B_PATH}/vdo-${i}/.vdo-cpanel 2>> ${Backup_log3}
+				LOGS_Func2 "Add ssl domain name to [ .vdo-cpanel ] file.." ${i} ${Backup_log3}
+			fi
+		fi
+
+		LOGS_Func1 "\t Prepare to compression backup folder and umount broadcaster folder.." ${Backup_log3}
+		cd ${M_B_PATH}
+		tar -pczf vdo-${i}.tar.gz vdo-${i} --exclude "vdo-${i}/home_dir/${i}/stream/hls/*" --exclude "vdo-${i}/home_dir/${i}/live-streaming/hls/*"
+		LOGS_Func1 "\t Success : Compression backup folder.." ${Backup_log3}
+		umount ${M_B_PATH}/vdo-${i}/home_dir/${i}
+		LOGS_Func2 "Umount broadcaster folder.." ${i} ${Backup_log3}
+		rm -rf vdo-${i}
+		LOGS_Func2 "Manually full backup for [ ${i} ] completed.." ${i} ${Backup_log3}
+
+		echo -e "Manually full backup for [ ${i} ] completed."
+		continue
+	done
+
+	if [ ${COUNT} = 0 ]; then
+		LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='success'" ${Backup_log3}
+	else
+		LOGS_Func1 "\nEnd date : $(DATE_S)\nbackup-status='fail'" ${Backup_log3}
+	fi
+
+	for UM in `mount | grep "/home/vdo-" | awk {'print $3'}`
+	do
+		umount ${UM}
+	done
+fi
+
+##################################################################################################
+################ [ restore-${Pre_} DAILY-WEEKLY-MANUALLY LOCAL-REMOTE-MANUALLY USERS.. ] #########
+
+if [ ${Option} = "restore-${Pre_}" ]; then
+	ARGC_NoLimit 4 4
+	echo -e "[ Start restore ${3} backup progress ].. TIME.[ $(DATE_S) ]\n" > ${Restore_log}
+	RESTORE_PATH=${USER_PATH_}
+	for i in ${@:4}
+	do
+		if [ ${3} = "local" ]; then
+			RESTORE_FROM="${Backup_PATH}/${2}/broadcasters/${i}"
+			DAI_WEE_MAN_BACK=${2}
+
+		elif [ ${3} = "remote" ]; then
+			REMOTE_HOST_CONF
+			DAI_WEE_MAN_BACK=${2}
+			RESTORE_R_FUNC()
+			{
+				rsync -avz --delete-after \
+				--rsh="sshpass -p ${REMOTE_PASS} ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no -l ${REMOTE_USER}" \
+				${REMOTE_HOST}:${REMOTE_DEST}/${1} ${2} >/dev/null 2>&1
+			}
+
+		elif [ ${3} = "manually" ]; then
+			RESTORE_FROM="/home/vdo-${i}"
+			DAI_WEE_MAN_BACK="manually"
+			LOGS_Func1 "- Start restore ${DAI_WEE_MAN_BACK} backup for [ ${i} ].. TIME.[ $(DATE_S) ]" ${Restore_log}
+			LOGS_Func1 "\t Prepare to extract backup file.." ${Restore_log}
+			tar -xzf /home/vdo-${i}.tar.gz -C /home
+			LOGS_Func2 "Extract backup file.." ${i} ${Restore_log}
+		else
+			echo -e "ARGC 3 for backup type not valid."
+			exit -1
+		fi
+
+		if [ ${3} != "manually" ]; then
+			LOGS_Func1 "- Start restore ${DAI_WEE_MAN_BACK} backup for [ ${i} ].. TIME.[ $(DATE_S) ]" ${Restore_log}
+		fi
+
+		# restore database
+		LOGS_Func1 "\t Prepare to restore database.." ${Restore_log}
+		if [ ${3} = "remote" ]; then
+			RESTORE_R_FUNC "${2}/broadcasters/${i}/database/${i}.sql" ${TMP_PATH}/${i}_restore.sql
+		else
+			rsync -avz ${RESTORE_FROM}/database/${i}.sql ${TMP_PATH}/${i}_restore.sql
+		fi
+		LARA_RESTORE_=`${PHP_RUN} /home/vdopanel/public_html/artisan restore:broadcaster ${i}`
+		if [[ ${LARA_RESTORE_} == *"Error"* || ${LARA_RESTORE_} == *"failed"* || ${LARA_RESTORE_} == *"error"* || ${LARA_RESTORE_} == *"Oops,"* ]]; then
+			COUNT=$((COUNT +1))
+			rm -rf /home/vdo-${i} ${TMP_PATH}/${i}_restore.sql >/dev/null 2>&1
+			echo -e "\t[*] Fail and Error : ${LARA_RESTORE_}" >> ${Restore_log}
+			continue
+		fi
+		LOGS_Func2 "Restore database.." ${i} ${Restore_log}
+
+		# restore home_dir files
+		LOGS_Func1 "\t Prepare to restore home dir.." ${Restore_log}
+		if [ ${3} = "remote" ]; then
+			RESTORE_R_FUNC "${2}/broadcasters/${i}/home_dir/${i}" ${RESTORE_PATH}
+		else
+			rsync -avz --delete-after ${RESTORE_FROM}/home_dir/${i} ${RESTORE_PATH} >/dev/null 2>&1
+		fi
+		LOGS_Func2 "Restore home dir.." ${i} ${Restore_log}
+
+		# restore user owner and permissions
+		LOGS_Func1 "\t Prepare to restore owner and permissions.." ${Restore_log}
+		if [ ! -f ${cPanel_chk} ]; then
+			find ${RESTORE_PATH}/${i} -type d -exec chmod 777 {} + >/dev/null 2>&1
+			chown -R ${i}.vdopanel ${RESTORE_PATH}/${i} >/dev/null 2>&1
+			CHK_LIST_=`ls ${RESTORE_PATH}/${i}/playlist/`
+			if [[ ${CHK_LIST_} ]]; then
+				chown -R vdopanel.vdopanel ${RESTORE_PATH}/${i}/playlist/*
+			fi
+			CHK_LIST_=`ls ${RESTORE_PATH}/${i}/imgs/`
+			if [[ ${CHK_LIST_} ]]; then
+				chown -R vdopanel.vdopanel ${RESTORE_PATH}/${i}/imgs/*
+			fi
+		else
+			chown -R vdopanel.vdopanel ${RESTORE_PATH}/${i} >/dev/null 2>&1
+		fi
+		LOGS_Func2 "Restore owner and permissions.." ${i} ${Restore_log}
+
+		# restore con-files files and reload service
+		LOGS_Func1 "\t Prepare to restore user configuration files.." ${Restore_log}
+		rm -rf ${NGX_CONF}/${i}-*
+		if [ ${3} = "remote" ]; then
+			RESTORE_R_FUNC "${2}/broadcasters/${i}/con-files/${i}-*" ${NGX_CONF}
+			LOGS_Func2 "Restore user configuration files for nginx and rtmp.." ${i} ${Restore_log}
+			if [ ! -f ${cPanel_chk} ]; then
+				RESTORE_R_FUNC "${2}/broadcasters/${i}/con-files/${i}" "/etc/vsftpd/users_config"
+				LOGS_Func2 "Restore user configuration files for ftp.." ${i} ${Restore_log}
+			fi
+		else
+			scp -r ${RESTORE_FROM}/con-files/${i}-* ${NGX_CONF}
+			LOGS_Func2 "Restore user configuration files for nginx and rtmp.." ${i} ${Restore_log}
+			if [ ! -f ${cPanel_chk} ]; then
+				scp -r ${RESTORE_FROM}/con-files/${i} /etc/vsftpd/users_config
+				LOGS_Func2 "Restore user configuration files for ftp.." ${i} ${Restore_log}
+			fi
+		fi
+
+
+		LOGS_Func1 "\t Prepare to apply public IP for config file.." ${Restore_log}
+		/home/vdopanel/core/utils rebuildrtmp ${i}
+		LOGS_Func2 "apply public IP for config file.." ${i} ${Restore_log}
+
+
+		# restore ssl-files if needed
+		SSL_DO1=`DB_INFO domain broadcasters "WHERE name='${i}'"`
+		MAIN_DOMAIN=`DB_INFO domain users`
+		HTTP_PORT=`DB_INFO http_port broadcasters "WHERE name='${i}'"`
+		IP_CHECK=`ipcalc -cs ${MAIN_DOMAIN} && echo vail_ip || echo invalid_ip`
+		if [ ${SSL_DO1} != "NULL" ]; then
+			LOGS_Func1 "\t Prepare to restore ssl files.." ${Restore_log}
+			if [ ! -f ${cPanel_chk} ]; then
+				if [ ${3} = "remote" ]; then
+					RESTORE_R_FUNC "${2}/broadcasters/${i}/ssl-files/*" "/etc/letsencrypt"
+				else
+					scp -r ${RESTORE_FROM}/ssl-files/* /etc/letsencrypt >/dev/null 2>&1
+				fi
+			else
+				/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+			fi
+			LOGS_Func2 "Restore ssl files.." ${i} ${Restore_log}
+		else
+			LOGS_Func1 "\t Prepare to set main domain for broadcaster ssl.." ${Restore_log}
+			DOMAIN_REP=`cat ${NGX_CONF}/${i}-http* | grep "server_name" | awk {'print $2'} | tr -d ";"`
+			FILE_REP=`ls ${NGX_CONF}/${i}-http*`
+			if [[ ${DOMAIN_REP} ]]; then
+				if [ ${IP_CHECK} = "vail_ip" ]; then
+					/home/vdopanel/core/utils rebuilddomain2 ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "Rebuild account to set server IP for broadcaster without ssl.." ${i} ${Restore_log}
+				else
+					if [ ! -f ${cPanel_chk} ]; then
+						sed -i "s/${DOMAIN_REP}/${MAIN_DOMAIN}/g" "${FILE_REP}"
+					else
+						/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					fi
+					LOGS_Func2 "set main domain for broadcaster ssl.." ${i} ${Restore_log}
+				fi
+			else
+				if [ ${IP_CHECK} = "vail_ip" ]; then
+					LOGS_Func1 "\t Not find domain to set it in vhost file.." ${Restore_log}
+				else
+					/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "Rebuild account to set main domain for broadcaster ssl.." ${i} ${Restore_log}
+				fi
+			fi
+		fi
+
+
+		/bin/systemctl reload nginx.service >/dev/null 2>&1
+		LOGS_Func2 "Reload nginx service.." ${i} ${Restore_log}
+		
+		rm -rf /home/vdo-${i} ${TMP_PATH}/${i}_restore.sql >/dev/null 2>&1
+		LOGS_Func2 "Restore ${DAI_WEE_MAN_BACK} backup for [ ${i} ] completed..\n\n" ${i} ${Restore_log}
+		echo -e "${DAI_WEE_MAN_BACK} backup for ${i} restored.."
+		continue
+	done
+
+	if [ ${COUNT} = 0 ]; then
+		LOGS_Func1 "\nEnd date : $(DATE_S)\nrestore-status='success'" ${Restore_log}
+	else
+		LOGS_Func1 "\nEnd date : $(DATE_S)\nrestore-status='fail'" ${Restore_log}
+	fi
+fi
+
+########################################################################################
+################ [ transfer-list-${Pre_} R_HOST R_PORT R_USER R_PASS ] #################
+################ [ transfer-do-${Pre_} R_HOST R_PORT R_USER R_PASS USERS.. ] ###########
+
+RUN_BASH_FUNC()
+{
+	sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} bash -s ${2} < ${1}
+}
+
+if [ ${Option} = "transfer-list-${Pre_}" ]; then
+	ARGC_Limit 5 5
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	REMOTE_PASS=${5}
+	sshpass -p "${REMOTE_PASS}" ssh -p ${REMOTE_PORT} -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "hostname" >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "Connection failed, remote host not connected."
+	else
+		RUN_BASH_FUNC "${TEM_CONF}/trans-template"
+	fi
+fi
+
+if [ ${Option} = "transfer-do-${Pre_}" ]; then
+	ARGC_NoLimit 6 6
+	REMOTE_HOST=${2}
+	REMOTE_PORT=${3}
+	REMOTE_USER=${4}
+	REMOTE_PASS=${5}
+	echo -e "[ Start transfer from source server progress ].. TIME.[ $(DATE_S) ]\n" > ${Transfer_log}
+
+	for i in ${@:6}
+	do
+		LOGS_Func1 "- Start transfer [ ${i} ] account.. TIME.[ $(DATE_S) ]" ${Transfer_log}
+		# take backup for sql file for broadcaster
+		LOGS_Func1 "\t Prepare to Create database copy from source server for  [ ${i} ] account.." ${Transfer_log}
+		R_cPanel_check=`COMM_SSH_FUNC "if [ -f /usr/local/cpanel/version ];then echo cpanel; else echo nocpanel; fi"`
+		if [ ${R_cPanel_check} = "cpanel" ]; then
+			R_USER_PATH_="/home/vdopanel/users"
+			PHP_get=`COMM_SSH_FUNC "/usr/local/cpanel/bin/whmapi1 php_get_installed_versions | grep ea-php"`
+			if [[ ${PHP_get} == *"ea-php74"* ]]; then
+				PHP_RUN_2="/usr/local/bin/ea-php74"
+			elif [[ ${PHP_get} == *"ea-php73"* ]]; then
+				PHP_RUN_2="/usr/local/bin/ea-php73"
+			elif [[ ${PHP_get} == *"ea-php72"* ]]; then
+				PHP_RUN_2="/usr/local/bin/ea-php72"
+			else
+				PHP_RUN_2="/usr/local/bin/php"
+			fi
+		else
+			R_USER_PATH_="/home"
+			PHP_RUN_2="/usr/bin/php"
+		fi
+
+		COMM_SSH_FUNC "${PHP_RUN_2} /home/vdopanel/public_html/artisan backup:broadcaster ${i}"
+		LOGS_Func2 "Create database for broadcaster.." ${i} ${Transfer_log}
+
+		# get and restore the sql file to create the account
+		LOGS_Func1 "\t Prepare to get database for  [ ${i} ] account.." ${Transfer_log}
+		SYNC_FUNC "${REMOTE_HOST}:${TMP_PATH}/${i}.sql ${TMP_PATH}/${i}_restore.sql"
+		LOGS_Func2 "Get database for broadcaster.." ${i} ${Transfer_log}
+
+		LOGS_Func1 "\t Prepare to restore database and create account [ ${i} ].." ${Transfer_log}
+		LARA_RESTORE_=`${PHP_RUN} /home/vdopanel/public_html/artisan restore:broadcaster ${i}`
+		COMM_SSH_FUNC "rm -rf ${REMOTE_HOST}:${TMP_PATH}/${i}.sql"
+		if [[ ${LARA_RESTORE_} == *"Error"* || ${LARA_RESTORE_} == *"failed"* || ${LARA_RESTORE_} == *"error"* || ${LARA_RESTORE_} == *"Oops,"* ]]; then
+			COUNT=$((COUNT +1))
+			rm -rf ${TMP_PATH}/${i}_restore.sql >/dev/null 2>&1
+			echo -e "\t[*] Fail and Error : ${LARA_RESTORE_}" >> ${Transfer_log}
+			continue
+		fi
+		LOGS_Func2 "Restore database and create account [ ${i} ].." ${i} ${Transfer_log}
+
+		# restore home_dir files from source server
+		LOGS_Func1 "\t Prepare to restore home dir.." ${Transfer_log}
+		SYNC_FUNC "${REMOTE_HOST}:${R_USER_PATH_}/${i} ${USER_PATH_}"
+		LOGS_Func2 "Restore home dir.." ${i} ${Transfer_log}
+
+		# get user info for nginx and ftp conf
+		LOGS_Func1 "\t Prepare to restore user configuration files.." ${Transfer_log}
+		rm -rf ${NGX_CONF}/${i}-*
+		SYNC_FUNC "${REMOTE_HOST}:${NGX_CONF}/${i}-* ${NGX_CONF}"
+		LOGS_Func2 "Restore user configuration files for nginx and rtmp.." ${i} ${Transfer_log}
+		LOGS_Func1 "\t Prepare to apply public IP for config file.." ${Transfer_log}
+		/home/vdopanel/core/utils rebuildrtmp ${i}
+		if [ ${cPanel_check} = "cpanel" ]; then
+			chown -R vdopanel.vdopanel ${USER_PATH_}/${i}
+		else
+			chown -R ${i}.vdopanel ${USER_PATH_}/${i}
+			find ${USER_PATH_}/${i} -type d -exec chmod 777 {} + >/dev/null 2>&1
+			CHK_LIST_=`ls ${RESTORE_PATH}/${i}/playlist/`
+			if [[ ${CHK_LIST_} ]]; then
+				chown -R vdopanel.vdopanel ${USER_PATH_}/${i}/playlist/*
+			fi
+			CHK_LIST_=`ls ${RESTORE_PATH}/${i}/imgs/`
+			if [[ ${CHK_LIST_} ]]; then
+				chown -R vdopanel.vdopanel ${USER_PATH_}/${i}/imgs/*
+			fi
+		fi
+		LOGS_Func2 "apply public IP for config file.." ${i} ${Transfer_log}
+
+#		SYNC_FUNC "${REMOTE_HOST}:/etc/vsftpd/users_config/${i} /etc/vsftpd/users_config"
+#		LOGS_Func2 "Restore user configuration files for ftp.." ${i} ${Transfer_log}
+
+		# get user config ssl info if needed
+		SSL_DO1=`RUN_BASH_FUNC "${TEM_CONF}/trans-template2" ${i}`
+		MAIN_DOMAIN=`DB_INFO domain users`
+		HTTP_PORT=`DB_INFO http_port broadcasters "WHERE name='${i}'"`
+		IP_CHECK=`ipcalc -cs ${MAIN_DOMAIN} && echo vail_ip || echo invalid_ip`
+		Reset_TO_MAIN_DOMAIN()
+		{
+			mysql ${DB_NAME} -e "UPDATE broadcasters SET domain = null WHERE name='${i}'"
+			if [ ${IP_CHECK} = "vail_ip" ]; then
+				/home/vdopanel/core/utils rebuilddomain2 ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+			else
+				/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+			fi
+			LOGS_Func2 "Restore account with default main domain setting.." ${i} ${Transfer_log}
+		}
+		if [[ ${SSL_DO1} == *"SSL"* ]]; then
+			LOGS_Func1 "\t Prepare to restore ssl files.." ${Transfer_log}
+			SSL_DOMAIN=`echo ${SSL_DO1} | cut -d"," -f2`
+
+			if [ ${cPanel_check} = "nocpanel" ] && [ ${R_cPanel_check} = "nocpanel" ]; then
+				mkdir -p /etc/letsencrypt/archive /etc/letsencrypt/live
+				SYNC_FUNC "${REMOTE_HOST}:/etc/letsencrypt/archive/${SSL_DOMAIN} /etc/letsencrypt/archive"
+				SYNC_FUNC "${REMOTE_HOST}:/etc/letsencrypt/live/${SSL_DOMAIN} /etc/letsencrypt/live"
+				LOGS_Func2 "Restore ssl files.." ${i} ${Transfer_log}
+
+			else
+				Reset_TO_MAIN_DOMAIN
+			fi
+		else
+			LOGS_Func1 "\t Prepare to set main domain for broadcaster ssl.." ${Transfer_log}
+			DOMAIN_REP=`cat ${NGX_CONF}/${i}-http* | grep "server_name" | awk {'print $2'} | tr -d ";"`
+			FILE_REP=`ls ${NGX_CONF}/${i}-http*`
+			if [[ ${DOMAIN_REP} ]]; then
+				if [ ${IP_CHECK} = "vail_ip" ]; then
+					/home/vdopanel/core/utils rebuilddomain2 ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "Rebuild account to set server IP for broadcaster without ssl.." ${i} ${Transfer_log}
+				else
+					/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "set main domain for broadcaster ssl.." ${i} ${Transfer_log}
+				fi
+			else
+				if [ ${IP_CHECK} = "vail_ip" ]; then
+					/home/vdopanel/core/utils rebuilddomain2 ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "set main domain for broadcaster none-ssl.." ${i} ${Transfer_log}
+				else
+					/home/vdopanel/core/utils rebuilddomain ${i} ${MAIN_DOMAIN} ${HTTP_PORT}
+					LOGS_Func2 "Rebuild account to set main domain for broadcaster ssl.." ${i} ${Transfer_log}
+				fi
+			fi
+		fi
+
+		# replace paths in playlist
+		LOGS_Func1 "\t Prepare to rebuild account playlist.." ${Transfer_log}
+		for repplyl in `ls ${USER_PATH_}/${i}/playlist`
+		do
+			if [ ${cPanel_check} = "cpanel" ]; then
+				REP_P_1="\/home\/${i}"
+				REP_P_2="\/home\/vdopanel\/users\/${i}"
+			else
+				REP_P_1="\/home\/vdopanel\/users\/${i}"
+				REP_P_2="\/home\/${i}"
+			fi
+			sed -i "s/${REP_P_1}/${REP_P_2}/g" "${USER_PATH_}/${i}/playlist/${repplyl}"
+			LOGS_Func2 "Rebuild account playlist [${repplyl}].." ${i} ${Transfer_log}
+		done
+
+		/bin/systemctl reload nginx.service >/dev/null 2>&1
+		LOGS_Func2 "Reload nginx service.." ${i} ${Transfer_log}
+
+		rm -rf ${TMP_PATH}/${i}_restore.sql >/dev/null 2>&1
+		LOGS_Func2 "Transfer account [ ${i} ] completed..\n\n" ${i} ${Transfer_log}
+	done
+
+	if [ ${COUNT} = 0 ]; then
+		LOGS_Func1 "\nEnd date : $(DATE_S)\ntransfer-status='success'" ${Transfer_log}
+	else
+		LOGS_Func1 "\nEnd date : $(DATE_S)\ntransfer-status='fail'" ${Transfer_log}
+	fi
+fi

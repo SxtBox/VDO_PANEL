@@ -1,0 +1,114 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -ne 6 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+export User=$1
+export Port_rtmp=$2
+export Port_http=$3
+export IP=$4
+export Bitrate=$5
+export rtmp_auth=$6
+
+validation_func()
+{
+ if [ $? -ne 0 ]; then
+	${1}
+	exit -1
+ fi
+}
+
+SERV_IP=`dig TXT +short o-o.myaddr.l.google.com @ns1.google.com -4 | tr -d '"'`
+
+NGX_CONF="/etc/nginx/conf.d"
+RTMP_FILE=`ls ${NGX_CONF}/${User}-rtmp.conf*`
+
+Social_Y_1=`cat ${RTMP_FILE} | grep youtube-pclive-stream`
+Social_Y_2=`cat ${RTMP_FILE} | grep youtube-webtv-stream`
+Social_F_1=`cat ${RTMP_FILE} | grep facebook-pclive-stream`
+Social_F_2=`cat ${RTMP_FILE} | grep facebook-webtv-stream`
+Social_T_1=`cat ${RTMP_FILE} | grep twitch-pclive-stream`
+Social_T_2=`cat ${RTMP_FILE} | grep twitch-webtv-stream`
+Social_P_1=`cat ${RTMP_FILE} | grep periscope-pclive-stream`
+Social_P_2=`cat ${RTMP_FILE} | grep periscope-webtv-stream`
+Social_D_1=`cat ${RTMP_FILE} | grep dailymotion-pclive-stream`
+Social_D_2=`cat ${RTMP_FILE} | grep dailymotion-webtv-stream`
+Social_C_1=`cat ${RTMP_FILE} | grep custom-pclive-stream`
+Social_C_1=${Social_C_1////\\/}
+Social_C_2=`cat ${RTMP_FILE} | grep custom-webtv-stream`
+Social_C_2=${Social_C_2////\\/}
+RECORD_CHK=`egrep "#record off" ${RTMP_FILE}`
+REC_ST="off"
+
+if [[ ${RECORD_CHK} ]]; then
+	REC_ST="on"
+fi
+
+cPanel_chk="/usr/local/cpanel/version"
+if [ ! -f ${cPanel_chk} ]; then
+	HOME_PATH="/home/${User}"
+else
+	HOME_PATH="/home/vdopanel/users/${User}"
+fi
+if [ ! -d ${HOME_PATH} ];then
+	echo -e "Error : user directory not exists."
+	exit -1
+fi
+
+if [ ${rtmp_auth} = "rtmp-auth" ]; then
+	cat /home/vdopanel/core/conf-templates/nginx-user-rtmp_psk.conf > ${RTMP_FILE}
+else
+	cat /home/vdopanel/core/conf-templates/nginx-user-rtmp.conf > ${RTMP_FILE}
+fi
+validation_func "echo 'Error : copy rtmp conf-templates'"
+
+sed -i "s/_PORT_/${Port_rtmp}/g" "${RTMP_FILE}"
+if [ -f ${cPanel_chk} ]; then
+	REP_USER="vdopanel\/users\/${User}"
+	sed -i "s/home\/_USER_/home\/${REP_USER}/g" "${RTMP_FILE}"
+fi
+sed -i "s/_USER_/${User}/g" "${RTMP_FILE}"
+sed -i "s/_SERV_IP_/${SERV_IP}/g" "${RTMP_FILE}"
+sed -i "s/_publish_IP_/${IP}/g" "${RTMP_FILE}"
+#sed -i "s/_BitRate_/${Bitrate}/g" "${RTMP_FILE}"
+#if [ ${Bitrate} = "288" ]; then
+#	Resolution="_low"
+#elif [ ${Bitrate} = "448" ]; then
+#	Resolution="_mid"
+#elif [ ${Bitrate} = "1152" ]; then
+#	Resolution="_high"
+#elif [ ${Bitrate} = "2048" ]; then
+#	Resolution="_hd720"
+#elif [ ${Bitrate} = "4096" ]; then
+#	Resolution="_src"
+#elif [ ${Bitrate} = "90000" ]; then
+#	Resolution="_src2"
+#fi
+#sed -i "s/_Resolution_/${Resolution}/g" "${RTMP_FILE}"
+
+sed -i "/youtube-pclive-stream/c\\${Social_Y_1}" "${RTMP_FILE}"
+sed -i "/youtube-webtv-stream/c\\${Social_Y_2}" "${RTMP_FILE}"
+sed -i "/facebook-pclive-stream/c\\${Social_F_1}" "${RTMP_FILE}"
+sed -i "/facebook-webtv-stream/c\\${Social_F_2}" "${RTMP_FILE}"
+sed -i "/twitch-pclive-stream/c\\${Social_T_1}" "${RTMP_FILE}"
+sed -i "/twitch-webtv-stream/c\\${Social_T_2}" "${RTMP_FILE}"
+sed -i "/periscope-pclive-stream/c\\${Social_P_1}" "${RTMP_FILE}"
+sed -i "/periscope-webtv-stream/c\\${Social_P_2}" "${RTMP_FILE}"
+sed -i "/dailymotion-pclive-stream/c\\${Social_D_1}" "${RTMP_FILE}"
+sed -i "/dailymotion-webtv-stream/c\\${Social_D_2}" "${RTMP_FILE}"
+sed -i "/custom-pclive-stream/c\\${Social_C_1}" "${RTMP_FILE}"
+sed -i "/custom-webtv-stream/c\\${Social_C_2}" "${RTMP_FILE}"
+
+if [ ${REC_ST} = "on" ]; then
+	sed -i "/record off/c\              #record off;" "${RTMP_FILE}"
+fi
+
+/home/vdopanel/core/utils rebuildrtmp ${User} >/dev/null 2>&1
+/bin/systemctl reload nginx.service
+validation_func "echo 'nginx configuration error.'"
+
+echo -e "success-done"

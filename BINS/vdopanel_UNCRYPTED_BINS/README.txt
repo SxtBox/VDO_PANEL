@@ -1,0 +1,1 @@
+FROM vdopanel.tar.gz

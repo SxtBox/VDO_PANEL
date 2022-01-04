@@ -1,0 +1,81 @@
+#!/usr/bin/bash
+
+ARGC=("$#")
+
+if [ $ARGC -ne 3 ]; then
+	echo "invalid option."
+	exit -1
+fi
+
+export Domain=$1
+export User=$2
+export Port_http=$3
+
+validation_func()
+{
+ if [ $? -ne 0 ]; then
+	${1}
+	exit -1
+ fi
+}
+
+SERV_IP=`dig TXT +short o-o.myaddr.l.google.com @ns1.google.com -4 | tr -d '"'`
+chk_domain=`dig +short ${Domain} | head -n 1`
+
+if [ ${SERV_IP} = ${chk_domain} ]; then
+	pass
+else
+	echo "domain not valid or not point to the server."
+	exit -1
+fi
+
+NGX_CONF="/etc/nginx/conf.d"
+SOU_CONF="/home/vdopanel/core/conf-templates"
+cPanel_chk="/usr/local/cpanel/version"
+
+if [ ! -f ${cPanel_chk} ]; then
+	HTTP_SSL_CONF="${SOU_CONF}/nginx-user-http_ssl.conf"
+	cat ${SOU_CONF}/domains.conf > ${NGX_CONF}/${Domain}.http
+	sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${Domain}.http"
+	sed -i "s/_DOMAIN_/${Domain}/g" "${NGX_CONF}/${Domain}.http"
+	/bin/systemctl reload nginx.service
+	validation_func "echo 'nginx configuration error.'"
+
+	certbot certonly --nginx \
+		-d "${Domain}" \
+		--non-interactive \
+		--agree-tos \
+		--register-unsafely-without-email >/dev/null 2>&1
+	validation_func "echo 'Error happened with certbot and install ssl.'"
+
+	cat ${SOU_CONF}/domains-ssl.conf > ${NGX_CONF}/${Domain}_ssl.http
+	sed -i "s/_USER_/${User}/g" "${NGX_CONF}/${Domain}_ssl.http"
+	sed -i "s/_DOMAIN_/${Domain}/g" "${NGX_CONF}/${Domain}_ssl.http"
+
+else
+	HTTP_SSL_CONF="${SOU_CONF}/nginx-user-http_ssl_cpanel.conf"
+	/bin/systemctl restart named.service >/dev/null 2>&1
+	/usr/local/cpanel/bin/whmapi1 set_tweaksetting key=allowremotedomains value=1 >/dev/null 2>&1
+	MAIN_DO=`cat /home/vdopanel/public_html/.env | grep APP_URL= | cut -d"/" -f3`
+	ADD_DO=`/usr/local/cpanel/bin/cpapi2 --user=vdopanel Park park domain=${Domain} 2>&1`
+	if [[ ${ADD_DO} == *"error:"* ]]; then
+		if [[ ${ADD_DO} == *"already exists in the userdata"* || ${ADD_DO} == *"You cannot park your main domain"* ]]; then
+			DO_="done"
+		else
+			echo -e "Error : Add domain to cpanel, ${ADD_DO}"
+			exit -1
+		fi
+	fi
+	/usr/local/cpanel/bin/autossl_check --user=vdopanel >/dev/null 2>&1
+	sleep 5
+	/usr/local/cpanel/bin/autossl_check --user=vdopanel >/dev/null 2>&1
+fi
+
+if [ ${Port_http} != "no-port" ]; then
+	/home/vdopanel/core/utils rebuilddomain ${User} ${Domain} ${Port_http}
+fi
+
+/bin/systemctl reload nginx.service
+validation_func "echo 'nginx configuration error ssl.'"
+
+echo -e "success-done"
