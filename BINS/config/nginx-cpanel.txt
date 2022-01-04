@@ -1,0 +1,73 @@
+user  _UOWNER_;
+worker_processes  _WORKER_NUM_;
+
+#error_log  logs/error.log;
+#error_log  logs/error.log  notice;
+#error_log  logs/error.log  info;
+
+#pid        logs/nginx.pid;
+#pid    logs/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+include    /etc/nginx/conf.d/*.conf;
+
+http {
+    include       mime.types;
+    include /etc/nginx/loadb/*.balance;
+
+    sendfile off;
+    tcp_nopush on;
+    aio on;
+    directio 512;
+    default_type application/octet-stream;
+
+    #log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+    #                  '$status $body_bytes_sent "$http_referer" '
+    #                  '"$http_user_agent" "$http_x_forwarded_for"';
+
+    #access_log  logs/access.log  main;
+
+    #gzip  on;
+
+    keepalive_timeout  120;
+    fastcgi_read_timeout 300;
+    client_max_body_size 5000M;
+    fastcgi_buffers 16 16k;
+    fastcgi_buffer_size 32k;
+    client_header_buffer_size 5120k;
+    large_client_header_buffers 16 5120k;
+
+geoip2 /etc/nginx/geoip/GeoLite2-Country.mmdb {
+    auto_reload 60m;
+    $geoip2_metadata_country_build metadata build_epoch;
+    $geoip2_data_country_code country iso_code;
+    $geoip2_data_country_name country names en;
+    $geoip2_data_continent_code continent code;
+}
+
+geoip2 /etc/nginx/geoip/GeoLite2-City.mmdb {
+    auto_reload 60m;
+    $geoip2_metadata_city_build metadata build_epoch;
+    $geoip2_data_city_name city names en;
+}
+
+#map $geoip2_data_country_code $domain_xyz_allowed_country {
+#    default yes;
+#    DE no;
+#}
+
+
+server{
+    listen       81;
+    server_name  _IP_;
+
+
+}
+
+
+include /etc/nginx/conf.d/*.http ;
+
+}

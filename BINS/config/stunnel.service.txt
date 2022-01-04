@@ -1,0 +1,22 @@
+[Unit]
+Description=SSL tunnel for network daemons
+After=network.target
+After=syslog.target
+
+[Install]
+WantedBy=multi-user.target
+Alias=stunnel.target
+
+[Service]
+Type=forking
+ExecStartPre=/usr/bin/mkdir -p /var/run/stunnel
+ExecStartPre=/usr/bin/chmod 777 /var/run/stunnel
+ExecStart=/usr/bin/stunnel /etc/stunnel/stunnel.conf
+ExecStop=/usr/bin/pkill stunnel
+ExecReload=/usr/bin/killall -HUP stunnel
+
+# Give up if ping don't get an answer
+TimeoutSec=600
+
+Restart=always
+PrivateTmp=false
